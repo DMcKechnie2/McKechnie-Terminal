@@ -1,0 +1,23 @@
+# McKechnie Terminal
+
+Flask + vanilla JS stock fundamental analysis dashboard.
+
+## Stack
+- Backend: Python/Flask, yfinance, requests (scraping Macrotrends)
+- Frontend: vanilla JS, HTML, Chart.js with datalabels plugin
+- Data: yfinance fast_info for quotes, bulk yf.download for movers
+
+## Key files
+- app.py — all Flask routes and data fetching
+- templates/index.html — entire frontend (single file)
+
+## Important quirks
+- yfinance dividendYield is already a % (0.41 = 0.41%, not 0.41%)
+- FCF comes from cashflow "Free Cash Flow" row, not manual calculation
+- Macrotrends FCF value is in var chartData → field v1 (in millions)
+- Tickers with "." in them skip Macrotrends (non-US)
+- _tape_cache shared between ticker tape and movers
+- format_large_number() for M/B/T formatting
+
+## Running locally
+python app.py
