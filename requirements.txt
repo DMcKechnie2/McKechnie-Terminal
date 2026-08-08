@@ -1,6 +1,13 @@
 flask
+# Production WSGI server. Single-process by design — see the SERVER=waitress
+# branch in app.py's __main__ for why multiple workers would break the locking.
+waitress
 yfinance
 pandas
 requests
 beautifulsoup4
 groq
+lxml
+
+# tests
+pytest

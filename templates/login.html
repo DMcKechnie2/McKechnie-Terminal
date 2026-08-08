@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign in — McKechnie Terminal</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #090910;
+  --surface: #10101a;
+  --surface2: #16161f;
+  --border: #22222e;
+  --accent: #00b341;
+  --text: #eeeef5;
+  --muted: #55556e;
+  --danger: #e03040;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background-image:
+    linear-gradient(rgba(0,179,65,0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,179,65,0.025) 1px, transparent 1px);
+  background-size: 48px 48px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.card {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 380px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 36px 32px 32px;
+}
+
+.brand { display: flex; align-items: center; gap: 12px; margin-bottom: 30px; }
+
+.logo-mark {
+  width: 30px; height: 30px; flex: none;
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  position: relative;
+}
+.logo-mark::after {
+  content: ''; position: absolute; inset: 6px;
+  background: var(--accent); border-radius: 2px;
+}
+
+.title {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 17px; font-weight: 700; letter-spacing: -0.01em;
+}
+.subtitle {
+  font-size: 10px; color: var(--muted);
+  letter-spacing: 0.16em; text-transform: uppercase; margin-top: 2px;
+}
+
+label {
+  display: block;
+  font-size: 10px; font-weight: 600; color: var(--muted);
+  letter-spacing: 0.14em; text-transform: uppercase;
+  margin-bottom: 7px;
+}
+
+input {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  padding: 11px 13px;
+  outline: none;
+  transition: border-color .15s;
+}
+input:focus { border-color: var(--accent); }
+
+.field { margin-bottom: 18px; }
+
+button {
+  width: 100%;
+  background: var(--accent);
+  color: #000;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13px; font-weight: 700;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  border: none; border-radius: 6px;
+  padding: 12px;
+  cursor: pointer;
+  transition: opacity .15s;
+}
+button:hover:not(:disabled) { opacity: .85; }
+button:disabled { opacity: .5; cursor: default; }
+
+.error {
+  display: none;
+  background: rgba(224,48,64,0.08);
+  border: 1px solid rgba(224,48,64,0.3);
+  border-radius: 6px;
+  color: var(--danger);
+  font-size: 12.5px;
+  padding: 10px 12px;
+  margin-bottom: 18px;
+}
+
+.foot {
+  margin-top: 22px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.6;
+  text-align: center;
+}
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div class="brand">
+    <div class="logo-mark"></div>
+    <div>
+      <div class="title">McKechnie Terminal</div>
+      <div class="subtitle">Sign in</div>
+    </div>
+  </div>
+
+  <div class="error" id="error"></div>
+
+  <form id="loginForm" autocomplete="on">
+    <div class="field">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username"
+             autocapitalize="none" spellcheck="false" autofocus required />
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password"
+             autocomplete="current-password" required />
+    </div>
+    <button type="submit" id="submitBtn">Sign in</button>
+  </form>
+
+  <div class="foot">Accounts are created by an administrator.</div>
+</div>
+
+<script>
+// The server has already reduced ?next= to a path inside this app; this is the
+// same check again, because the value reaches location.href here.
+const RAW_NEXT = {{ next_url | tojson }};
+const NEXT = (typeof RAW_NEXT === 'string'
+              && RAW_NEXT.startsWith('/')
+              && !RAW_NEXT.startsWith('//')
+              && !RAW_NEXT.includes('\\')) ? RAW_NEXT : '/';
+
+const form   = document.getElementById('loginForm');
+const errBox = document.getElementById('error');
+const btn    = document.getElementById('submitBtn');
+
+function showError(msg) {
+  errBox.textContent = msg;          // textContent, never innerHTML
+  errBox.style.display = 'block';
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  errBox.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = 'Signing in...';
+
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        username: document.getElementById('username').value,
+        password: document.getElementById('password').value,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      location.href = NEXT;
+      return;
+    }
+    showError(data.error || 'Sign in failed.');
+  } catch (err) {
+    showError('Could not reach the server.');
+  }
+
+  document.getElementById('password').value = '';
+  btn.disabled = false;
+  btn.textContent = 'Sign in';
+});
+</script>
+
+</body>
+</html>

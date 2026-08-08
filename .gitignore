@@ -2,3 +2,23 @@ __pycache__/
 *.pyc
 .claude/
 *.zip
+
+# Live API keys (Anthropic / FRED / Groq / DeepSeek). No leading slash, so this
+# also covers the per-account copies at users/<name>/settings.json.
+settings.json
+
+# The session signing key. Leaking it lets anyone mint a valid cookie for any
+# account, so it is the single most sensitive file here.
+app_secret.json
+
+# Password hashes and account records — never commit
+users.json
+
+# Generated report PDFs: large, rebuildable, and they embed the theses of
+# whoever built them. The portfolio JSON under users/<name>/ stays tracked,
+# matching how it was tracked at the repo root before accounts existed.
+users/*/reports/
+
+# Local scratch output from the value screener
+value_screen_raw.json
+value_screen_ranked.json
