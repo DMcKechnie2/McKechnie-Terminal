@@ -95,6 +95,25 @@ def make_client(username):
     return client
 
 
+@pytest.fixture(autouse=True)
+def _fresh_rate_buckets():
+    """Start every test with a full rate-limit allowance.
+
+    The limiter keys on a device cookie and a client address, and the test
+    client keeps its cookies and is always 127.0.0.1 — so without this the whole
+    suite shares one bucket and the 448th request pays for the first. That is a
+    slow failure that shows up as an unrelated test going red once somebody adds
+    a few more, so the reset is per test rather than per session.
+
+    Like the auth bypass above, this lives entirely in test code: app.py has no
+    flag that turns the limiter off. tests/test_rate_limit.py is the file that
+    opts back in and drives it on purpose.
+    """
+    terminal._rate_buckets.clear()
+    yield
+    terminal._rate_buckets.clear()
+
+
 @pytest.fixture(scope='session', autouse=True)
 def _auth_test_harness(tmp_path_factory):
     """Redirect every store to a temp directory and seed the test account.

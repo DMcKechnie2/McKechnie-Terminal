@@ -358,6 +358,68 @@ def test_blank_description_is_labelled_not_silently_dropped():
 
 
 # ---------------------------------------------------------------------------
+# _build_ownership — missing is not zero, and >100% is not clampable
+# ---------------------------------------------------------------------------
+
+def test_absent_ownership_is_dropped_not_read_as_zero():
+    """Yahoo returns None for both fields on most non-US listings, and there is
+    no fallback — major_holders is empty for them too. The old `or 0` turned
+    that into 0% institutional, so retail fell out of `1 - 0 - 0` at 100% and
+    the page drew a full doughnut claiming GOOG.TO is entirely retail-held.
+    """
+    assert terminal._build_ownership({}) == {}
+    assert terminal._build_ownership(
+        {'heldPercentInstitutions': None, 'heldPercentInsiders': None}) == {}
+    # NaN survives an `is None` check and would serialise as invalid JSON.
+    assert terminal._build_ownership(
+        {'heldPercentInstitutions': float('nan'),
+         'heldPercentInsiders': float('nan')}) == {}
+
+
+def test_a_genuine_zero_still_reports():
+    """The point is telling missing from zero, so a real 0% must survive."""
+    own = terminal._build_ownership(
+        {'heldPercentInstitutions': 0.0, 'heldPercentInsiders': 0.0})
+    assert own['institutional'] == 0.0
+    assert own['retail'] == 100.0
+
+
+def test_ordinary_split_sums_to_one_hundred():
+    own = terminal._build_ownership(          # AAPL, as reported
+        {'heldPercentInstitutions': 0.66289, 'heldPercentInsiders': 0.01647})
+    assert own['institutional'] == 66.29
+    assert own['insider'] == 1.65
+    assert own['exceeds_outstanding'] is False
+    assert abs(own['institutional'] + own['insider'] + own['retail'] - 100) < 0.01
+
+
+@pytest.mark.parametrize('inst,insider', [
+    (1.2325, 0.0074),   # WING
+    (1.1224, 0.0304),   # CARG
+    (1.0570, 0.0211),   # CVNA
+    (0.8175, 0.1899),   # TREE — only just over
+])
+def test_over_one_hundred_percent_suppresses_retail_rather_than_clamping(inst, insider):
+    """13F filings double-count lent shares, so institutional legitimately
+    passes 100%. Clamping retail to 0 asserts "no retail float", which the data
+    does not say; the flag lets the frontend drop the doughnut instead of
+    letting Chart.js renormalise 123% into a slice drawn as 99%.
+    """
+    own = terminal._build_ownership(
+        {'heldPercentInstitutions': inst, 'heldPercentInsiders': insider})
+    assert own['exceeds_outstanding'] is True
+    assert own['retail'] is None
+    assert own['institutional'] == round(inst * 100, 2)   # reported as-is
+
+
+def test_one_half_present_reports_without_implying_the_rest():
+    own = terminal._build_ownership({'heldPercentInstitutions': 0.5})
+    assert own['institutional'] == 50.0
+    assert own['insider'] is None
+    assert own['retail'] is None
+
+
+# ---------------------------------------------------------------------------
 # JsonStore — atomic writes, loud failures, no lost updates
 # ---------------------------------------------------------------------------
 
@@ -1261,6 +1323,110 @@ def test_holdings_chart_counts_transactions_with_suffixed_ids(monkeypatch, bare_
     assert seen.get('tickers') == ['ONLY.TO'], 'suffixed-id trade never reached the chart'
 
 
+# ---------------------------------------------------------------------------
+# Time-weighted return — /api/holdings/chart
+# ---------------------------------------------------------------------------
+
+def _twr_fixture(monkeypatch, prices, txns):
+    """Drive the chart route over a hand-built price series.
+
+    `prices` is a list of closes for one ticker on consecutive days ending
+    yesterday, so the window always sits inside the 1Y range no matter when the
+    suite runs. Returns the parsed payload.
+    """
+    import datetime as _d
+    import pandas as pd
+
+    day0 = _d.date.today() - _d.timedelta(days=len(prices))
+    days = [day0 + _d.timedelta(days=i) for i in range(len(prices))]
+
+    def _fake_download(tickers, **kw):
+        idx = pd.DatetimeIndex(days)
+        cols = sorted(tickers) if not isinstance(tickers, str) else [tickers]
+        return pd.concat({'Close': pd.DataFrame(
+            {t: list(prices) for t in cols}, index=idx)}, axis=1)
+
+    monkeypatch.setattr(terminal.yf, 'download', _fake_download)
+    monkeypatch.setattr(terminal, 'load_transactions', lambda: [
+        dict(t, date=days[t['day']].isoformat(), ticker='X.TO', name='X',
+             id=str(1780000000000 + i))
+        for i, t in enumerate(txns)
+    ])
+    return terminal.app.test_client().get('/api/holdings/chart?range=1Y').get_json()
+
+
+def test_twr_is_unmoved_by_contribution_timing(monkeypatch, bare_portfolio):
+    """The defining property of a time-weighted return, and the one the old
+    code did not have: it measures what the holdings did, not what the investor
+    did. Two accounts in the same security over the same window must report the
+    same return however differently they funded it.
+
+    This was Modified Dietz — a *money-weighted* return — reported and labelled
+    as TWR. Dietz is what you use when you lack periodic valuations and have to
+    assume flows arrive at an average moment; this route builds a daily
+    valuation series, so there was nothing to approximate.
+
+    Prices move only on days with no contribution, so the two conventions for an
+    intraday flow agree and the expected answer is exactly the price return:
+    +20% then -25%, so -10%. On the staggered ledger the old formula returned
+    -51.24%, five times the loss, on a book that held one security throughout.
+    """
+    prices = [100.0, 100.0, 120.0, 120.0, 90.0]
+
+    steady = _twr_fixture(monkeypatch, prices, [
+        {'day': 0, 'type': 'buy', 'shares': 10, 'price': 100.0},
+    ])
+    staggered = _twr_fixture(monkeypatch, prices, [
+        {'day': 0, 'type': 'buy', 'shares': 1,   'price': 100.0},
+        {'day': 1, 'type': 'buy', 'shares': 50,  'price': 100.0},
+        {'day': 3, 'type': 'buy', 'shares': 100, 'price': 120.0},
+    ])
+
+    assert steady['twr']    == pytest.approx(-0.10, abs=1e-6)
+    assert staggered['twr'] == pytest.approx(-0.10, abs=1e-6), (
+        'contribution schedule moved the time-weighted return — this is Dietz, '
+        'not TWR')
+
+
+def test_twr_counts_a_contribution_as_capital_not_as_gain(monkeypatch,
+                                                          bare_portfolio):
+    """New money is already inside the day's closing value, so it has to be in
+    the denominator too. Leave it out and the deposit reads as a profit: here a
+    flat price with a contribution that quadruples the account would print
+    +300%."""
+    payload = _twr_fixture(monkeypatch, [100.0, 100.0, 100.0], [
+        {'day': 0, 'type': 'buy', 'shares': 10, 'price': 100.0},
+        {'day': 1, 'type': 'buy', 'shares': 30, 'price': 100.0},
+    ])
+    assert payload['values'][-1] == pytest.approx(4000.0)
+    assert payload['twr'] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_twr_under_a_year_is_not_annualized(monkeypatch, bare_portfolio):
+    """GIPS 5.A.4. Raising a 29-day return to the 12.6th power printed +96.22%
+    on the live book's 1M view — an extrapolation rendered as a measurement, and
+    the largest number on the page. The frontend falls back to the period return
+    when this is null, so the gate lives here rather than in the template."""
+    payload = _twr_fixture(monkeypatch, [100.0, 110.0], [
+        {'day': 0, 'type': 'buy', 'shares': 10, 'price': 100.0},
+    ])
+    assert payload['twr'] == pytest.approx(0.10, abs=1e-6)
+    assert payload['annualized_twr'] is None
+
+
+def test_twr_over_a_year_is_annualized(monkeypatch, bare_portfolio):
+    """The other side of that gate: a multi-year window is scaled *down* to a
+    per-annum figure, which is a restatement rather than a forecast."""
+    prices  = [100.0] + [200.0] * 730          # 731 days, D = 730
+    payload = _twr_fixture(monkeypatch, prices, [
+        {'day': 0, 'type': 'buy', 'shares': 10, 'price': 100.0},
+    ])
+    assert payload['twr'] == pytest.approx(1.0, abs=1e-6)
+    # 2x over two years is not 100%/yr.
+    assert payload['annualized_twr'] == pytest.approx(2.0 ** (365 / 730) - 1,
+                                                      abs=1e-6)
+
+
 def test_invested_credits_dividend_paid_on_its_own_ex_date(monkeypatch, bare_portfolio):
     """yfinance gives one date per distribution, so _build_div_events falls back
     to pay_date == ex_date. The pay event sorted at priority 0 and the snapshot
@@ -1859,6 +2025,36 @@ def test_the_settings_route_masks_and_never_returns_the_key(groq):
     body = terminal.app.test_client().get('/api/settings').get_json()
     assert body['GROQ_API_KEY'].endswith('abcd')
     assert 'gsk_1234567890abcd' not in json.dumps(body)
+
+
+def test_a_blank_field_leaves_a_stored_key_alone(groq):
+    """The Settings page posts all four fields on one Save with usually one of
+    them filled in, so '' has to mean "untouched" — otherwise saving a DeepSeek
+    key wipes the three keys the user did not retype."""
+    groq.set_key('gsk_keep_me')
+
+    r = terminal.app.test_client().post('/api/settings', json={
+        'GROQ_API_KEY': '', 'DEEPSEEK_API_KEY': 'sk_new', 'FRED_API_KEY': '   '})
+    assert r.status_code == 200
+
+    assert terminal._resolve_api_key('GROQ_API_KEY', TEST_USER) == 'gsk_keep_me'
+    assert terminal._resolve_api_key('DEEPSEEK_API_KEY', TEST_USER) == 'sk_new'
+
+
+def test_null_clears_a_key(groq):
+    """Because '' means "untouched", clearing needs its own signal — and it has
+    to be one no untouched form field can produce. That is what the Remove
+    control on each key card sends; without it a key could be set and never
+    unset."""
+    groq.set_key('gsk_remove_me')
+
+    r = terminal.app.test_client().post('/api/settings', json={'GROQ_API_KEY': None})
+    assert r.status_code == 200
+
+    assert terminal._resolve_api_key('GROQ_API_KEY', TEST_USER) == ''
+    assert terminal.app.test_client().get('/api/settings').get_json()['GROQ_API_KEY'] == ''
+    # Removing one key is not removing the account's settings file.
+    assert 'GROQ_API_KEY' not in terminal._load_settings(TEST_USER)
 
 
 def test_client_is_rebuilt_only_when_the_key_changes(groq):

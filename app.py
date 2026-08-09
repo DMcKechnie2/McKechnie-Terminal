@@ -88,22 +88,58 @@ def groq_call(system, user, max_tokens=80, key=''):
         return ''
 
 
-def format_large_number(value):
-    """Format a money value as $X.XXT/B/M.
+# A money figure is meaningless without the unit it is denominated in, and a
+# hardcoded '$' is a wrong answer rather than a missing one: SK hynix files in
+# won, so its 189T KRW of revenue rendered as "$189.17T" — a number larger than
+# any company on earth has ever billed, and one a reader has no way to spot as
+# a unit error. The figures were right; only the symbol lied.
+#
+# CNY and JPY both use ¥, so CNY is disambiguated rather than left to collide.
+# An unmapped currency falls back to its ISO code ('SEK 4.50B'), which is
+# unambiguous — never to '$', because a wrong unit reads as a real number.
+_CURRENCY_SYMBOLS = {
+    'USD': '$',   'CAD': 'C$',  'EUR': '€',   'GBP': '£',   'JPY': '¥',
+    'KRW': '₩',   'CNY': 'CN¥', 'TWD': 'NT$', 'HKD': 'HK$', 'AUD': 'A$',
+    'NZD': 'NZ$', 'INR': '₹',   'BRL': 'R$',  'MXN': 'Mex$','SGD': 'S$',
+    'ILS': '₪',   'ZAR': 'R',   'CHF': 'CHF ','SEK': 'SEK ','NOK': 'NOK ',
+    'DKK': 'DKK ','PLN': 'PLN ','TRY': '₺',   'THB': '฿',   'IDR': 'Rp',
+}
 
-    The sign is pulled out and applied outside the $ so that a negative
+
+def _currency_symbol(code):
+    """Display prefix for an ISO currency code.
+
+    'GBp' is Yahoo's marker for a pence-quoted London listing — a real unit,
+    not a typo for GBP, and 1/100th of it. Mapping it onto '£' would overstate
+    every quoted price a hundredfold, so it keeps its own prefix.
+    """
+    if not code:
+        return '$'
+    if code == 'GBp':
+        return 'p'
+    return _CURRENCY_SYMBOLS.get(code.upper(), f'{code.upper()} ')
+
+
+def format_large_number(value, symbol='$'):
+    """Format a money value as <symbol>X.XXT/B/M.
+
+    The sign is pulled out and applied outside the symbol so that a negative
     scales correctly: -4.5e9 renders '-$4.50B', not '$-4500.00M'.
+
+    `symbol` defaults to '$' so that portfolio code — which is always in the
+    account's own currency — is unaffected. Anything reading a *filer's*
+    statements must pass the currency that filer reports in.
     """
     if value is None:
         return 'N/A'
     sign = '-' if value < 0 else ''
     mag  = abs(value)
     if mag >= 1_000_000_000_000:
-        return f"{sign}${mag / 1_000_000_000_000:.2f}T"
+        return f"{sign}{symbol}{mag / 1_000_000_000_000:.2f}T"
     elif mag >= 1_000_000_000:
-        return f"{sign}${mag / 1_000_000_000:.2f}B"
+        return f"{sign}{symbol}{mag / 1_000_000_000:.2f}B"
     else:
-        return f"{sign}${mag / 1_000_000:.2f}M"
+        return f"{sign}{symbol}{mag / 1_000_000:.2f}M"
 
 
 def _finite(value):
@@ -149,15 +185,30 @@ def clean_ticker(raw):
 #
 # yfinance returns five annual columns, and Yahoo's own fundamentals-timeseries
 # endpoint caps at four however wide a window you ask it for, so Macrotrends is
-# the only way to chart more than five years. It serves fourteen, and it serves
-# every metric from one endpoint in one response shape — hence one scraper for
-# all of them rather than one per metric, which is how the same parsing bug came
-# to be copied four times.
+# the only way to chart more than five years. It serves every metric from one
+# endpoint in one response shape — hence one scraper for all of them rather than
+# one per metric, which is how the same parsing bug came to be copied four times.
 # ---------------------------------------------------------------------------
 
 _MT_URL = 'https://www.macrotrends.net/production/stocks/desktop/fundamental_iframe.php'
 _MT_UA  = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
            '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+# How far back to ask for. Unset, the endpoint serves fourteen years — which is
+# not a limit on what it holds, only its default, and reads exactly like one.
+# Apple's chart page embeds this iframe with `yb=15`, which is how the parameter
+# surfaced at all; it is honoured well past that, and 40 reaches Apple's 1987.
+#
+# The extra years are free: the response is the same ~10KB and the same ~0.15s
+# whether it carries fourteen rows or thirty-nine, so there is no reason to ask
+# per metric or to tune this per chart. Macrotrends truncates at its own
+# coverage rather than padding — NVDA starts at fiscal 1999, the year it listed —
+# so a high number costs nothing on a young company.
+#
+# Verified before raising it: across ten tickers and all five series, every
+# value the old request returned is byte-identical in the wider one. `yb` only
+# prepends older rows, so it cannot move a year `_mt_check` validates against.
+_MT_YEARS_BACK = 40
 
 # Macrotrends quantises the share count to the nearest million, which turns a
 # small-cap series into flat runs of identical values. Drop a series that coarse
@@ -203,7 +254,7 @@ def _mt_chart_rows(ticker, series_type, statement, timeout=10):
     r = req.get(
         _MT_URL,
         params={'t': base, 'type': series_type, 'statement': statement,
-                'freq': 'A', 'sub': ''},
+                'freq': 'A', 'sub': '', 'yb': _MT_YEARS_BACK},
         headers={'User-Agent': _MT_UA,
                  'Referer': f'https://www.macrotrends.net/stocks/charts/{base.lower()}/stock/{series_type}'},
         timeout=timeout,
@@ -280,12 +331,25 @@ def _mt_check(mt_by_year, yf_by_year, spec, min_overlap=2, max_bad=None):
     disagreements are normal and one bad year is allowed before the series goes.
 
     Measured over a fifteen-ticker basket spanning banks, January filers, recent
-    splits and loss-makers, this accepts 44 of 45 series and adds ten years to
-    each. The one rejection is Amazon's free cash flow, where all four
-    overlapping years disagree by up to 31% because the two sources net capital
-    leases differently — which is the case worth rejecting, since splicing the
-    older years on would put a definitional step change mid-chart and read as a
-    real swing in the business.
+    splits and loss-makers, this accepts 44 of 45 series. What an accepted series
+    adds is bounded by `_MT_YEARS_BACK` and then by the company's own age: 35
+    years for Apple or Coca-Cola, 24 for NVIDIA, which listed in 1999.
+
+    Rejections are all the same shape — a source that disagrees by a steady
+    offset rather than at one year. Amazon's free cash flow runs 12-31% above
+    yfinance's on all four overlapping years because the two net capital leases
+    differently, and Exxon's runs 11-14% above on three of four. Those are the
+    cases worth rejecting: splicing the older years on would put a definitional
+    step change mid-chart and read as a real swing in the business.
+
+    Note the asymmetry this leaves, and that widening the window deepened: the
+    gate only ever sees the four or five years yfinance also carries, so it
+    validates the series *as a whole* on its most recent tail and admits
+    everything behind it on that evidence. That holds up because the errors it
+    exists to catch — wrong company, unit slip, year shift, a definitional gap
+    like Amazon's — are properties of the whole series and show up on any
+    overlap. A one-off bad year deep in the unvalidated past would not be caught,
+    and never was.
     """
     overlap = sorted(set(mt_by_year) & set(yf_by_year))
     bad     = []
@@ -794,7 +858,10 @@ def canada_drops():
                 'price':   round(float(q.get('regularMarketPrice', 0) or 0), 2),
                 'change':  round(float(chg), 2),
                 'volume':  q.get('regularMarketVolume', 0),
-                'mkt_cap': format_large_number(q.get('marketCap')),
+                # A screen spans exchanges, so the rows are in mixed currencies
+                # — the quote says which, and every one of them is not '$'.
+                'mkt_cap': format_large_number(
+                    q.get('marketCap'), _currency_symbol(q.get('currency'))),
             })
         return jsonify({'results': results, 'count': len(results)})
     except Exception as e:
@@ -861,7 +928,9 @@ def _quotes_to_items(quotes, exchange):
             'price':       round(float(q.get('regularMarketPrice', 0)), 2),
             'change':      round(float(q.get('regularMarketChangePercent', 0)), 2),
             'volume':      q.get('regularMarketVolume', 0),
-            'mkt_cap':     format_large_number(q.get('marketCap')),
+            # The TSX tables are in CAD; only the US ones are in dollars.
+            'mkt_cap':     format_large_number(
+                q.get('marketCap'), _currency_symbol(q.get('currency'))),
             'exchange':    exchange,
             'enriched':    True,
         })
@@ -997,43 +1066,6 @@ def debug_raw_series():
                     'total': len(rows), 'sample': rows[-5:]})
 
 
-OLLAMA_URL   = 'http://localhost:11434/api/chat'
-OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'qwen2-math:7b')
-
-@app.route('/api/chat', methods=['POST'])
-def chat():
-    import requests as req
-    data     = request.json or {}
-    messages = data.get('messages', [])
-    context  = data.get('context', '')
-    if not messages:
-        return jsonify({'error': 'No messages provided'}), 400
-
-    system_prompt = (
-        'You are a financial analysis assistant inside McKechnie Terminal, a personal stock research tool. '
-        'Help with DCF valuations, financial ratios, investment math, and portfolio analysis. '
-        'Be concise and direct. Show working for calculations. Use $ and % where relevant.'
-    )
-    if context:
-        system_prompt += f'\n\nCurrent context: {context}'
-
-    payload = {
-        'model':    OLLAMA_MODEL,
-        'messages': [{'role': 'system', 'content': system_prompt}] + messages,
-        'stream':   False,
-        'options':  {'temperature': 0.2, 'num_predict': 512},
-    }
-    try:
-        r = req.post(OLLAMA_URL, json=payload, timeout=60)
-        r.raise_for_status()
-        reply = r.json()['message']['content'].strip()
-        return jsonify({'reply': reply})
-    except req.exceptions.ConnectionError:
-        return jsonify({'error': 'Ollama is not running. Start it with: ollama serve'}), 503
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 @app.route('/api/search', methods=['GET'])
 def search_tickers():
     query = request.args.get('q', '').strip()
@@ -1153,7 +1185,8 @@ def _df_row(df, *names):
     return None
 
 
-def _build_balance_sheet(bs, qbs, fin, shares_out=None, price=None):
+def _build_balance_sheet(bs, qbs, fin, shares_out=None, price=None,
+                         symbol='$', price_matches_filing=True):
     """Balance-sheet snapshot plus a per-year series.
 
     The snapshot is read from ONE column. Mixing this quarter's assets with last
@@ -1178,7 +1211,7 @@ def _build_balance_sheet(bs, qbs, fin, shares_out=None, price=None):
                 'current_liabilities', 'debt', 'net_debt', 'cash',
                 'goodwill', 'tangible_book'):
         result[key] = None
-        result[key + '_str'] = format_large_number(None)
+        result[key + '_str'] = format_large_number(None, symbol)
 
     frame, col, period = None, None, None
     for df, label in ((qbs, 'MRQ'), (bs, 'FY')):
@@ -1199,7 +1232,7 @@ def _build_balance_sheet(bs, qbs, fin, shares_out=None, price=None):
 
         def money(key, value):
             result[key] = value
-            result[key + '_str'] = format_large_number(value)
+            result[key + '_str'] = format_large_number(value, symbol)
 
         assets   = cell('Total Assets')
         liabs    = cell('Total Liabilities Net Minority Interest', 'Total Liabilities')
@@ -1246,7 +1279,13 @@ def _build_balance_sheet(bs, qbs, fin, shares_out=None, price=None):
         if tbv is not None and shares_out:
             tbvps = tbv / float(shares_out)
             result['tangible_book_per_share'] = round(tbvps, 2)
-            if price and tbvps > 0:
+            # An ADR trades in one currency and files in another — TSM quotes in
+            # USD and reports in TWD — so price / book-per-share divides dollars
+            # by New Taiwan dollars and lands ~31x off. The result looks like an
+            # ordinary ratio, which is what makes it dangerous. Suppressed rather
+            # than converted: a live FX rate applied to a filed balance sheet
+            # invents a figure that appeared on no statement.
+            if price and tbvps > 0 and price_matches_filing:
                 result['price_to_tangible_book'] = round(float(price) / tbvps, 2)
 
     # Interest coverage comes off the income statement, so it is an annual
@@ -1288,11 +1327,11 @@ def _build_balance_sheet(bs, qbs, fin, shares_out=None, price=None):
             row = {
                 'year':          _fiscal_year(pd.Timestamp(ts)),
                 'assets':        assets,
-                'assets_str':    format_large_number(assets),
+                'assets_str':    format_large_number(assets, symbol),
                 'liabilities':      liabs,
-                'liabilities_str':  format_large_number(liabs),
+                'liabilities_str':  format_large_number(liabs, symbol),
                 'equity':        equity,
-                'equity_str':    format_large_number(equity),
+                'equity_str':    format_large_number(equity, symbol),
                 'tangible_book': at(t_row),
                 'current_ratio': round(cur_a / cur_l, 2) if cur_a is not None and cur_l else None,
                 'debt_to_equity': round(debt / equity, 2) if debt is not None and equity and equity > 0 else None,
@@ -1362,7 +1401,8 @@ _RATING_LABELS = {
 }
 
 
-def _build_analyst(info, eps_est=None, rev_est=None, price=None):
+def _build_analyst(info, eps_est=None, rev_est=None, price=None,
+                   price_symbol='$', money_symbol='$'):
     """Street price targets, consensus rating and forward estimates.
 
     Targets and the rating come out of `info`, which the lookup already holds,
@@ -1371,10 +1411,21 @@ def _build_analyst(info, eps_est=None, rev_est=None, price=None):
 
     yfinance reports estimate `growth` as a **decimal** (0.2054 = 20.54%), the
     opposite convention to `dividendYield`. It is converted here, once.
+
+    The two frames are **not** necessarily in the same currency, and each says
+    which it is in a `currency` column. TSM's EPS estimates come back in USD
+    per ADR while its revenue estimates come back in TWD — so the frame's own
+    column wins over anything inferred from the listing, and the passed
+    symbols are only the fallback for a frame that omits it.
     """
-    def rows(df, year_ago_col, money):
+    def rows(df, year_ago_col, money, default_symbol):
         if df is None or getattr(df, 'empty', True):
             return []
+        symbol = default_symbol
+        if 'currency' in getattr(df, 'columns', []):
+            codes = [c for c in df['currency'].dropna().unique() if c]
+            if len(codes) == 1:
+                symbol = _currency_symbol(str(codes[0]))
         out = []
         for period, label in _EST_PERIODS:
             if period not in df.index:
@@ -1389,7 +1440,9 @@ def _build_analyst(info, eps_est=None, rev_est=None, price=None):
                 'period':     period,
                 'label':      label,
                 'avg':        avg,
-                'avg_str':    format_large_number(avg) if money else f"${avg:.2f}",
+                'avg_str':    (format_large_number(avg, symbol) if money
+                               else f"{symbol}{avg:.2f}"),
+                'currency_symbol': symbol,
                 'low':        _finite(r.get('low')),
                 'high':       _finite(r.get('high')),
                 'year_ago':   _finite(r.get(year_ago_col)),
@@ -1399,8 +1452,13 @@ def _build_analyst(info, eps_est=None, rev_est=None, price=None):
         return out
 
     result = {
-        'eps_estimates': rows(eps_est, 'yearAgoEps',     money=False),
-        'rev_estimates': rows(rev_est, 'yearAgoRevenue', money=True),
+        # EPS is quoted per traded share, revenue comes off the income
+        # statement — different currencies for an ADR, hence different defaults.
+        'eps_estimates': rows(eps_est, 'yearAgoEps',     money=False,
+                              default_symbol=price_symbol),
+        'rev_estimates': rows(rev_est, 'yearAgoRevenue', money=True,
+                              default_symbol=money_symbol),
+        'price_symbol':  price_symbol,
     }
 
     target_mean = _finite(info.get('targetMeanPrice'))
@@ -1424,6 +1482,16 @@ def _build_analyst(info, eps_est=None, rev_est=None, price=None):
     return result
 
 
+# A float larger than the share count is impossible on one basis — the float is
+# a subset of the count. Yahoo reports it anyway on depositary receipts, where
+# the two are quoted on different bases; see `_build_short_interest`. The 2%
+# margin covers the two figures being dated a few days apart. Measured
+# 2026-08-08, the smallest real mismatch clears it by two orders of magnitude:
+# ASML 55.5x, TSM 7.3x, HDB 5.0x, INFY 1.9x, against 0.99-1.00x on AAPL, SONY,
+# SHOP and RY.TO.
+_FLOAT_BASIS_MAX = 1.02
+
+
 def _build_short_interest(info):
     """Short-interest snapshot. Every field is already in `info` — no extra call.
 
@@ -1431,6 +1499,24 @@ def _build_short_interest(info):
     `dividendYield`, which Yahoo hands over already scaled. Yahoo also omits it
     for most non-US listings — RY.TO has a share count but no percentage — so it
     is recomputed from sharesShort / floatShares when missing.
+
+    **That fallback cannot run on a depositary receipt.** Yahoo quotes
+    `floatShares` for an ADR on the *ordinary share* basis while `sharesShort`
+    and `sharesOutstanding` count receipts, so the division mixes units and
+    understates the answer by the whole deposit ratio — ASML reads 0.006% where
+    0.33% of the receipts are short, TSM 0.09% against 0.64%. The two
+    conditions are not independent: Yahoo omits the percentage for non-US
+    listings, and non-US is exactly where the mixed basis lives, so the
+    fallback fires precisely where it is wrong.
+
+    `_FLOAT_BASIS_MAX` catches it, and the percentage is then None — suppressed
+    rather than converted, the same call as a cross-currency ratio, because the
+    deposit ratio appears nowhere in the payload and any conversion would be a
+    number Yahoo never reported. Two things deliberately keep their value.
+    Yahoo's own `shortPercentOfFloat` is already on the receipt basis (TSM 0.69%
+    against 0.64% of shares outstanding, not the 0.09% an ordinary-share float
+    would give), so only the fallback is guarded. And `pct_of_outstanding` is
+    sound throughout: both of its terms count receipts.
     """
     shares_short = _finite(info.get('sharesShort'))
     if not shares_short:
@@ -1441,10 +1527,12 @@ def _build_short_interest(info):
     out_sh   = (_finite(info.get('sharesOutstanding'))
                 or _finite(info.get('impliedSharesOutstanding')))
 
+    mixed_basis = bool(float_sh and out_sh and float_sh > out_sh * _FLOAT_BASIS_MAX)
+
     pct_float = _finite(info.get('shortPercentOfFloat'))
     if pct_float is not None:
         pct_float = round(pct_float * 100, 2)
-    elif float_sh:
+    elif float_sh and not mixed_basis:
         pct_float = round(shares_short / float_sh * 100, 2)
 
     result = {
@@ -1466,6 +1554,64 @@ def _build_short_interest(info):
             result['as_of'] = _datetime.fromtimestamp(int(ts), tz=_timezone.utc).date().isoformat()
     except (TypeError, ValueError, OSError):
         pass
+
+    return result
+
+
+def _build_ownership(info):
+    """Institutional / insider / retail split, or {} when Yahoo reports neither.
+
+    Institutional and insider are disjoint by construction, so the remainder is
+    genuinely retail: Yahoo's own `institutionsFloatPercentHeld` equals
+    `heldPercentInstitutions / (1 - heldPercentInsiders)` to five decimals on
+    every ticker checked (GOOGL, SIRI, BYND), which means institutions hold out
+    of the float and insiders hold the rest. The split is the right shape. Two
+    Yahoo behaviours break the arithmetic on top of it, and both are common
+    enough to hit this portfolio.
+
+    **The fields are absent for most non-US listings**, the same gap
+    `_build_short_interest` documents for `shortPercentOfFloat`. GOOG.TO,
+    MSFT.TO, META.TO, LULU.TO and ZMMK.TO return None for both, and there is no
+    fallback — `ticker.major_holders` is an empty frame for all of them. The old
+    `info.get(...) or 0` read that as 0% institutional, so `retail` fell out of
+    `1 - 0 - 0` at **100%** and the page drew a full doughnut claiming Alphabet
+    is entirely retail-held. Four of the ten symbols in this account's portfolio
+    rendered that way. Missing is not zero, so the section is dropped instead
+    and the frontend's existing empty state shows.
+
+    **Institutional can legitimately exceed 100%.** 13F filings double-count
+    lent shares — the lender still reports a position the short buyer now also
+    reports — so WING reads 123%, CARG 112%, ZG 107%, CVNA 106%. That is real
+    information about share lending rather than a Yahoo typo, so the figure is
+    reported as-is. What cannot survive is `retail`: it is None here rather than
+    clamped to 0, because a clamped 0 asserts "no retail float", which is a
+    claim the data does not make. `exceeds_outstanding` tells the frontend the
+    three parts no longer form a whole, so it can drop the doughnut rather than
+    let Chart.js renormalise 123% into a slice drawn as 99%.
+
+    Suppressed rather than reconciled, for the same reason a cross-currency
+    ratio is: scaling the three to sum to 100 would invent a number that
+    appeared in no filing.
+    """
+    inst    = _finite(info.get('heldPercentInstitutions'))
+    insider = _finite(info.get('heldPercentInsiders'))
+    if inst is None and insider is None:
+        return {}
+
+    result = {
+        'institutional':       round(inst * 100, 2) if inst is not None else None,
+        'insider':             round(insider * 100, 2) if insider is not None else None,
+        'retail':              None,
+        'exceeds_outstanding': False,
+    }
+
+    # The remainder needs both halves. One field present and the other missing
+    # is still worth showing on its own; it just cannot imply the rest.
+    if inst is not None and insider is not None:
+        if inst + insider <= 1.0:
+            result['retail'] = round((1.0 - inst - insider) * 100, 2)
+        else:
+            result['exceeds_outstanding'] = True
 
     return result
 
@@ -1519,6 +1665,22 @@ def _do_get_stock(tkkr):
         price    = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose') or None
         currency = info.get('currency', 'USD')
 
+        # Two currencies, and conflating them is a real error rather than a
+        # cosmetic one. `currency` is what the *listing* trades in; the
+        # statements are filed in `financialCurrency`, and for an ADR those
+        # differ — TSM quotes in USD and files in TWD, Sony in USD and JPY.
+        # Market cap, price and street targets follow the listing; revenue,
+        # earnings, FCF, capex and the balance sheet follow the filing. Reading
+        # them under one symbol put a 31x error on TSM's revenue and a 150x one
+        # on Sony's, both rendered as ordinary dollars.
+        financial_currency = info.get('financialCurrency') or currency
+        trade_sym = _currency_symbol(currency)
+        fin_sym   = _currency_symbol(financial_currency)
+        # GBp is GBP quoted in pence, so a London listing is the one case where
+        # the codes differ but the money is the same money — 100:1 apart, which
+        # still bars any cross-currency ratio.
+        same_currency = (currency or '').upper() == (financial_currency or '').upper()
+
         # Override price with fast_info for real-time consistency with watchlist quotes
         try:
             fi = ticker.fast_info
@@ -1533,12 +1695,12 @@ def _do_get_stock(tkkr):
         forward_pe   = info.get('forwardPE')  or None
         week52_high  = info.get('fiftyTwoWeekHigh') or info.get('52WeekHigh') or None
         week52_low   = info.get('fiftyTwoWeekLow')  or info.get('52WeekLow')  or None
-        market_cap = format_large_number(info.get('marketCap') or info.get('regularMarketCap'))
+        market_cap = format_large_number(info.get('marketCap') or info.get('regularMarketCap'), trade_sym)
         raw_debt   = info.get('totalDebt') or info.get('longTermDebt') or 0
         raw_cash   = info.get('totalCash') or info.get('cash') or 0
         net_debt   = raw_debt - raw_cash
-        debt       = format_large_number(raw_debt)
-        cash       = format_large_number(raw_cash) if raw_cash else 'N/A'
+        debt       = format_large_number(raw_debt, fin_sym)
+        cash       = format_large_number(raw_cash, fin_sym) if raw_cash else 'N/A'
 
         # --- Capex ---
         capex_ttm_str = 'N/A'
@@ -1550,7 +1712,7 @@ def _do_get_stock(tkkr):
                 capex_row = cashflow.loc['Capital Expenditure']
                 ttm_val = capex_row.iloc[0]
                 if ttm_val is not None and not pd.isna(ttm_val):
-                    capex_ttm_str = format_large_number(abs(float(ttm_val)))
+                    capex_ttm_str = format_large_number(abs(float(ttm_val)), fin_sym)
                 for date, val in sorted(capex_row.items()):
                     if val is not None and not pd.isna(val):
                         yr = date.year if date.month >= 4 else date.year - 1
@@ -1573,11 +1735,11 @@ def _do_get_stock(tkkr):
                             yf_capex[yr] = val
                     if ttm_capex_raw is not None and partial_yr not in yf_capex:
                         ttm_capex = abs(ttm_capex_raw)
-                        capex_ttm_entry = {'year': 'TTM', 'raw': ttm_capex, 'value': format_large_number(ttm_capex)}
+                        capex_ttm_entry = {'year': 'TTM', 'raw': ttm_capex, 'value': format_large_number(ttm_capex, fin_sym)}
             except Exception:
                 pass
 
-            capex_by_year = [{'year': yr, 'raw': v, 'value': format_large_number(v)} for yr, v in sorted(yf_capex.items())]
+            capex_by_year = [{'year': yr, 'raw': v, 'value': format_large_number(v, fin_sym)} for yr, v in sorted(yf_capex.items())]
             if capex_ttm_entry:
                 capex_by_year.append(capex_ttm_entry)
         except Exception:
@@ -1650,7 +1812,7 @@ def _do_get_stock(tkkr):
                 fcf = cashflow.loc['Free Cash Flow']
                 for date, value in sorted(fcf.items()):
                     if value is not None and not pd.isna(value):
-                        fcf_annual.append({'year': date.year, 'raw': float(value), 'value': format_large_number(value)})
+                        fcf_annual.append({'year': date.year, 'raw': float(value), 'value': format_large_number(value, fin_sym)})
             else:
                 operating = cashflow.loc['Operating Cash Flow'] if 'Operating Cash Flow' in cashflow.index else None
                 capex     = cashflow.loc['Capital Expenditure']  if 'Capital Expenditure'  in cashflow.index else None
@@ -1658,7 +1820,7 @@ def _do_get_stock(tkkr):
                     fcf = (operating + capex) if capex is not None else operating
                     for date, value in sorted(fcf.items()):
                         if value is not None and not pd.isna(value):
-                            label = format_large_number(value) + ('' if capex is not None else ' (OCF)')
+                            label = format_large_number(value, fin_sym) + ('' if capex is not None else ' (OCF)')
                             fcf_annual.append({'year': date.year, 'raw': float(value), 'value': label})
         except Exception:
             pass
@@ -1678,9 +1840,9 @@ def _do_get_stock(tkkr):
                         by_year[yr] = by_year.get(yr, 0) + float(value)
                 for yr, total in by_year.items():
                     if yr not in yf_years and yr != partial_yr:
-                        fcf_annual.append({'year': yr, 'raw': total, 'value': format_large_number(total)})
+                        fcf_annual.append({'year': yr, 'raw': total, 'value': format_large_number(total, fin_sym)})
                 if ttm_fcf is not None and partial_yr not in yf_years:
-                    fcf_ttm_entry = {'year': 'TTM', 'raw': ttm_fcf, 'value': format_large_number(ttm_fcf)}
+                    fcf_ttm_entry = {'year': 'TTM', 'raw': ttm_fcf, 'value': format_large_number(ttm_fcf, fin_sym)}
             else:
                 q_operating = qcf.loc['Operating Cash Flow'] if 'Operating Cash Flow' in qcf.index else None
                 q_capex     = qcf.loc['Capital Expenditure']  if 'Capital Expenditure'  in qcf.index else None
@@ -1694,10 +1856,10 @@ def _do_get_stock(tkkr):
                             by_year[yr] = by_year.get(yr, 0) + float(value)
                     for yr, total in by_year.items():
                         if yr not in yf_years and yr != partial_yr:
-                            label = format_large_number(total) + ('' if q_capex is not None else ' (OCF)')
+                            label = format_large_number(total, fin_sym) + ('' if q_capex is not None else ' (OCF)')
                             fcf_annual.append({'year': yr, 'raw': total, 'value': label})
                     if ttm_fcf is not None and partial_yr not in yf_years:
-                        label = format_large_number(ttm_fcf) + ('' if q_capex is not None else ' (OCF)')
+                        label = format_large_number(ttm_fcf, fin_sym) + ('' if q_capex is not None else ' (OCF)')
                         fcf_ttm_entry = {'year': 'TTM', 'raw': ttm_fcf, 'value': label}
             fcf_annual.sort(key=lambda r: r['year'])
         except Exception:
@@ -1717,7 +1879,7 @@ def _do_get_stock(tkkr):
             # back to operating cash flow — the frontend reads that marker out of
             # this string to paint the bar amber and warn about it.
             fcf_annual = [{'year': y, 'raw': v,
-                           'value': fcf_labels.get(y) or format_large_number(v),
+                           'value': fcf_labels.get(y) or format_large_number(v, fin_sym),
                            'src': fcf_src[y]} for y, v in sorted(merged.items())]
         except Exception:
             pass
@@ -1823,7 +1985,7 @@ def _do_get_stock(tkkr):
                 rev_row = fin.loc['Total Revenue']
                 ttm_val = rev_row.iloc[0]
                 if ttm_val is not None and not pd.isna(ttm_val):
-                    revenue_ttm_str = format_large_number(float(ttm_val))
+                    revenue_ttm_str = format_large_number(float(ttm_val), fin_sym)
                 yf_rev = {}
                 for date, val in sorted(rev_row.items()):
                     if val is not None and not pd.isna(val):
@@ -1844,10 +2006,10 @@ def _do_get_stock(tkkr):
                             if yr not in yf_rev and yr != partial_yr:
                                 yf_rev[yr] = val
                         if ttm_rev is not None and partial_yr not in yf_rev:
-                            rev_ttm_entry = {'year': 'TTM', 'raw': ttm_rev, 'value': format_large_number(ttm_rev)}
+                            rev_ttm_entry = {'year': 'TTM', 'raw': ttm_rev, 'value': format_large_number(ttm_rev, fin_sym)}
                 except Exception:
                     pass
-                revenue_by_year = [{'year': yr, 'raw': v, 'value': format_large_number(v)} for yr, v in sorted(yf_rev.items())]
+                revenue_by_year = [{'year': yr, 'raw': v, 'value': format_large_number(v, fin_sym)} for yr, v in sorted(yf_rev.items())]
                 if rev_ttm_entry:
                     revenue_by_year.append(rev_ttm_entry)
         except Exception:
@@ -1888,7 +2050,7 @@ def _do_get_stock(tkkr):
                             yf_ni[yr] = val
                     if ttm_ni is not None and partial_yr not in yf_ni:
                         ni_ttm_entry = {'year': 'TTM', 'raw': ttm_ni,
-                                        'value': format_large_number(ttm_ni), 'src': 'yf'}
+                                        'value': format_large_number(ttm_ni, fin_sym), 'src': 'yf'}
             except Exception:
                 pass
             # yfinance reaches back five years; Macrotrends carries fourteen, and
@@ -1898,7 +2060,7 @@ def _do_get_stock(tkkr):
             # No abs(): a loss-making year must not render as a positive figure.
             # format_large_number now scales negatives correctly, so the sign can
             # be carried through to the label.
-            earnings_by_year = [{'year': yr, 'raw': v, 'value': format_large_number(v),
+            earnings_by_year = [{'year': yr, 'raw': v, 'value': format_large_number(v, fin_sym),
                                  'src': ni_src[yr]} for yr, v in sorted(yf_ni.items())]
             if ni_ttm_entry:
                 # Appended after the sort: 'TTM' is a string and won't order
@@ -1915,7 +2077,9 @@ def _do_get_stock(tkkr):
             eps = info.get('trailingEps') or info.get('epsTrailingTwelveMonths')
             if eps is not None and not pd.isna(float(eps)):
                 eps_raw = float(eps)
-                eps_ttm_str = f"${eps_raw:.2f}"
+                # Per traded share, so the listing's currency — unlike the
+                # by-year series below, which comes off the income statement.
+                eps_ttm_str = f"{trade_sym}{eps_raw:.2f}"
         except Exception:
             pass
         try:
@@ -1954,7 +2118,7 @@ def _do_get_stock(tkkr):
                 yf_eps, _mt_years(_mt_result(mt, 'eps')), 'eps',
                 tol_rel=None if eps_reported else 0.15)
             eps_by_year = [{'year': yr, 'raw': v,
-                            'value': ('-' if v < 0 else '') + '$' + _eps_str(abs(v)),
+                            'value': ('-' if v < 0 else '') + fin_sym + _eps_str(abs(v)),
                             'src': eps_src[yr]} for yr, v in sorted(yf_eps.items())]
         except Exception:
             pass
@@ -2009,19 +2173,20 @@ def _do_get_stock(tkkr):
         try:
             _shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding')
             if eps_raw is not None and _shares is not None:
+                # trailingEps is per *traded* share, so this lands in the
+                # listing's currency — USD per ADR for TSM, not the TWD its
+                # income statement is filed in.
                 earnings_ttm_raw = eps_raw * float(_shares)
-                v = earnings_ttm_raw
-                sign = '-' if v < 0 else ''
-                abs_v = abs(v)
-                if abs_v >= 1e12:
-                    earnings_ttm_str = f"{sign}${abs_v/1e12:.2f}T"
-                elif abs_v >= 1e9:
-                    earnings_ttm_str = f"{sign}${abs_v/1e9:.2f}B"
-                else:
-                    earnings_ttm_str = f"{sign}${abs_v/1e6:.2f}M"
-                # Override profit margin with the same earnings basis / TTM revenue
+                earnings_ttm_str = format_large_number(earnings_ttm_raw, trade_sym)
+                # Override profit margin with the same earnings basis / TTM
+                # revenue — but only when both legs are the same money.
+                # `totalRevenue` is a filing figure, so for an ADR this divided
+                # USD earnings by TWD revenue and printed TSM's 38% net margin
+                # as 1.33%. A ratio carries no unit to give the error away.
+                # Yahoo's own `profitMargins` is already unit-free and correct,
+                # so the fallback above stands rather than being replaced.
                 _rev = info.get('totalRevenue')
-                if _rev and float(_rev) != 0:
+                if _rev and float(_rev) != 0 and same_currency:
                     profit_margin_str = f"{(earnings_ttm_raw / float(_rev)) * 100:.2f}%"
         except Exception:
             pass
@@ -2065,14 +2230,7 @@ def _do_get_stock(tkkr):
         # --- Ownership ---
         ownership = {}
         try:
-            inst_pct   = info.get('heldPercentInstitutions') or 0
-            insider_pct = info.get('heldPercentInsiders') or 0
-            retail_pct = max(0.0, 1.0 - inst_pct - insider_pct)
-            ownership = {
-                'institutional': round(float(inst_pct) * 100, 2),
-                'insider':       round(float(insider_pct) * 100, 2),
-                'retail':        round(float(retail_pct) * 100, 2),
-            }
+            ownership = _build_ownership(info)
         except Exception:
             pass
 
@@ -2084,7 +2242,8 @@ def _do_get_stock(tkkr):
         try:
             balance_sheet = _build_balance_sheet(
                 ticker.balance_sheet, ticker.quarterly_balance_sheet,
-                ticker.financials, shares_outstanding, price)
+                ticker.financials, shares_outstanding, price,
+                symbol=fin_sym, price_matches_filing=same_currency)
         except Exception:
             pass
 
@@ -2098,7 +2257,8 @@ def _do_get_stock(tkkr):
         analyst = {}
         try:
             analyst = _build_analyst(
-                info, ticker.earnings_estimate, ticker.revenue_estimate, price)
+                info, ticker.earnings_estimate, ticker.revenue_estimate, price,
+                price_symbol=trade_sym, money_symbol=fin_sym)
         except Exception:
             pass
 
@@ -2113,6 +2273,13 @@ def _do_get_stock(tkkr):
             'name': name,
             'price': f"{price:.2f}" if price else 'N/A',
             'currency': currency,
+            # The frontend formats its own chart labels off `raw`, so it needs
+            # the same split the strings above already carry: statement charts
+            # are in the filing currency, quote-derived boxes in the listing's.
+            'financial_currency': financial_currency,
+            'currency_symbol': trade_sym,
+            'financial_currency_symbol': fin_sym,
+            'same_currency': same_currency,
             'market_cap': market_cap,
             'sector': sector,
             'exchange': exchange,
@@ -2822,43 +2989,6 @@ def remove_from_watchlist(ticker):
     items = load_watchlist()
     items = [i for i in items if i['ticker'] != ticker]
     save_watchlist(items)
-    return jsonify(items)
-
-
-# ── Theses ─────────────────────────────────────────────────────────────────────
-THESES_FILE = _register_user_file('theses.json', list)
-
-def load_theses(owner=None):
-    return _user_store(THESES_FILE, owner).load()
-
-def save_theses(items, owner=None):
-    _user_store(THESES_FILE, owner).save(items)
-    return True
-
-@app.route('/api/theses', methods=['GET'])
-def get_theses():
-    return jsonify(load_theses())
-
-@app.route('/api/theses', methods=['POST'])
-@atomic
-def add_thesis():
-    data = request.json or {}
-    thesis = (data.get('thesis') or '').strip()
-    if not thesis:
-        return jsonify({'error': 'thesis required'}), 400
-    items = load_theses()
-    items.append(thesis)
-    save_theses(items)
-    return jsonify(items)
-
-@app.route('/api/theses/<int:idx>', methods=['DELETE'])
-@atomic
-def remove_thesis(idx):
-    items = load_theses()
-    if idx < 0 or idx >= len(items):
-        return jsonify({'error': 'index out of range'}), 404
-    items.pop(idx)
-    save_theses(items)
     return jsonify(items)
 
 
@@ -4359,45 +4489,67 @@ def holdings_chart():
         values_out.append(round(total_value, 2))
         invested_out.append(round(invested, 2))
 
-    # ── Modified Dietz return ─────────────────────────────────────────────────
-    # R = (V1 − V0 − C) / (V0 + Σ w_i·C_i)   where w_i = (D − d_i) / D
-    # External cash flow = new external capital only (sell→buy is NOT a flow).
-    # invested_out tracks cumulative external capital; daily increments are the C_i.
+    # ── Time-weighted return ──────────────────────────────────────────────────
+    #   r_i = V_i / (V_{i−1} + C_i)          TWR = Π r_i − 1
+    #
+    # Daily chain-linking, which is what "time-weighted" means. This was Modified
+    # Dietz, and Dietz is a *money-weighted* return — it answers a different
+    # question than the tile asks. Money-weighted measures what the investor
+    # earned including the effect of when they added capital; time-weighted
+    # strips that effect out and measures what the holdings themselves did. On
+    # this book over nine months they differ by 2.2 points (+25.55% against a
+    # true +27.75%), and they diverge without bound as contributions grow
+    # relative to the opening balance: double your money on $1k, add $100k, drop
+    # 10%, and the two read +80% and −84% for one portfolio on one day.
+    #
+    # Dietz is the approximation you reach for when you *lack* periodic
+    # valuations and have to assume flows arrive at an average moment.
+    # values_out is a daily valuation series, so there is nothing to approximate
+    # — chain the days and the flow-timing effect cancels exactly.
+    #
+    # C_i is external capital only; sale proceeds, dividends and closed-option
+    # gains stay inside the portfolio and belong to the return, which is what
+    # invested_out already encodes. It sits in the *denominator* because the
+    # loop above applies the day's transactions before valuing at that day's
+    # close: the new money is already inside V_i, so leaving it out of the base
+    # would book the contribution itself as a gain.
     twr = annualized_twr = None
     twr_reliable = False
 
-    if len(values_out) >= 2 and dates_out:
+    if len(values_out) >= 2:
         from datetime import date as _dc
-        d0_obj = _dc.fromisoformat(dates_out[0])
-        d1_obj = _dc.fromisoformat(dates_out[-1])
-        D = (d1_obj - d0_obj).days
+        D = (_dc.fromisoformat(dates_out[-1]) - _dc.fromisoformat(dates_out[0])).days
 
-        if D > 0:
-            if range_param == 'ALL':
-                # Portfolio was empty before first purchase; all invested increments
-                # starting from day 0 are external flows.
-                V0, prev_ci, i_start = 0.0, 0.0, 0
-            else:
-                # Existing portfolio value at range start is V0, not a flow.
-                V0, prev_ci, i_start = values_out[0], invested_out[0], 1
+        growth  = 1.0
+        linked  = 0   # days that contributed a return
+        skipped = 0   # days with no capital at risk
 
-            V1 = values_out[-1]
-            total_C = weighted_C = 0.0
+        # Day 0 sets the opening balance and cannot itself carry a return —
+        # there is no prior close to measure it against.
+        for i in range(1, len(values_out)):
+            cf   = invested_out[i] - invested_out[i - 1]
+            base = values_out[i - 1] + cf
+            if base <= 0:
+                skipped += 1      # empty account: no return to link
+                continue
+            growth *= values_out[i] / base
+            linked += 1
 
-            for i in range(i_start, len(invested_out)):
-                cf = max(0.0, invested_out[i] - prev_ci)
-                prev_ci = invested_out[i]
-                if cf > 0:
-                    d_i = (_dc.fromisoformat(dates_out[i]) - d0_obj).days
-                    w_i = (D - d_i) / D
-                    total_C    += cf
-                    weighted_C += w_i * cf
-
-            denom = V0 + weighted_C
-            if denom > 0:
-                twr            = round((V1 - V0 - total_C) / denom, 6)
-                twr_reliable   = D >= 30
-                annualized_twr = round((1.0 + twr) ** (365.0 / D) - 1.0, 6)
+        if linked:
+            twr = round(growth - 1.0, 6)
+            # A gap means the window contains days the return does not cover.
+            twr_reliable = skipped == 0
+            # GIPS 5.A.4: a period shorter than a year is not annualized.
+            # Raising a 29-day return to the 12.6th power printed +96.22% on the
+            # 1M view of this book — an extrapolation rendered as a measurement,
+            # and the largest number on the page.
+            #
+            # growth > 0 because a closed option can post a loss into the cash
+            # pool, so a day's value is not structurally positive. A negative
+            # base under a fractional exponent returns a *complex* number in
+            # Python rather than raising, and round() then 500s the route.
+            if D >= 365 and growth > 0:
+                annualized_twr = round(growth ** (365.0 / D) - 1.0, 6)
 
     return jsonify({
         'dates': dates_out, 'values': values_out, 'invested': invested_out,
@@ -4540,8 +4692,6 @@ def delete_option(option_id):
 # ---------------------------------------------------------------------------
 # App settings (API keys stored in settings.json)
 # ---------------------------------------------------------------------------
-import json as _json_mod
-
 _SETTINGS_PATH = os.path.join(_DATA_DIR, 'settings.json')
 _SETTINGS_KEYS = ('ANTHROPIC_API_KEY', 'FRED_API_KEY', 'GROQ_API_KEY',
                   'DEEPSEEK_API_KEY')
@@ -4681,13 +4831,27 @@ _SECURE_COOKIE_ENV = os.environ.get('SESSION_COOKIE_SECURE', '').strip().lower()
 _SECURE_COOKIE = (_SECURE_COOKIE_ENV in ('1', 'true', 'yes') if _SECURE_COOKIE_ENV
                   else os.environ.get('HOST', '127.0.0.1') not in _LOOPBACK_HOSTS)
 
+# How long a signed-in session outlives the tab.
+#
+# SESSION_PERMANENT=0 makes it a *browser-session* cookie: it carries no expiry,
+# so closing the browser ends the session and the next visit asks for a password
+# again. PERMANENT_SESSION_LIFETIME does not apply in that mode — Flask only
+# consults it for permanent sessions — which is why this is a separate switch
+# rather than "set the lifetime very low".
+#
+# The default stays permanent so that running this locally behaves as it always
+# has; a deployment that wants re-authentication turns it off in the env file.
+_SESSION_PERMANENT = (os.environ.get('SESSION_PERMANENT', '1').strip().lower()
+                      not in ('0', 'false', 'no'))
+_SESSION_HOURS = float(os.environ.get('SESSION_HOURS', '12') or 12)
+
 app.secret_key = _resolve_secret_key()
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,      # keeps the cookie out of document.cookie
     SESSION_COOKIE_SAMESITE='Lax',     # first line of defence against CSRF
     SESSION_COOKIE_SECURE=_SECURE_COOKIE,
-    PERMANENT_SESSION_LIFETIME=_timedelta(hours=12),
-    SESSION_REFRESH_EACH_REQUEST=True,  # makes the 12h an idle window, not a cap
+    PERMANENT_SESSION_LIFETIME=_timedelta(hours=_SESSION_HOURS),
+    SESSION_REFRESH_EACH_REQUEST=True,  # makes the window idle-based, not a cap
 )
 
 # Behind a reverse proxy every request arrives *from the proxy*, so
@@ -4977,6 +5141,235 @@ def _check_csrf():
     return None
 
 
+# --- rate limiting --------------------------------------------------------
+#
+# Same argument as the gate above, and deliberately the same shape: a
+# before_request hook with a default that covers every route, not a decorator
+# somebody has to remember. The expensive routes here do not look expensive from
+# the outside — /api/stock fans out into five Macrotrends scrapes, /api/news
+# spends an LLM key across ~135 threads under a 25s deadline, and
+# /api/generate-report starts a six-minute subprocess — so a route added after
+# this line is limited *because it exists*, and loosening one takes an explicit
+# edit to _RATE_LIMITS that a test asserts on.
+#
+# The bucket is per device rather than per account. Two reasons: the login route
+# has no account yet, and that is exactly where a limit is worth having; and
+# keying on the account would mean signing out handed back a fresh allowance. So
+# the id is an opaque random cookie kept deliberately *outside* the session —
+# session.clear() runs on both login and logout, and anything living there
+# resets with it.
+#
+# A cookie is client state, so a client that drops it draws a new bucket. That
+# is what the second, coarser per-address bucket is for: _ADDR_FACTOR times the
+# device allowance, so several real devices behind one address never meet it,
+# while a loop minting a fresh cookie per request meets it after that factor.
+# Both are consulted and the stricter answer wins — the same "worst of these
+# keys" rule _login_locked() already uses.
+#
+# Behind a reverse proxy the address half only means anything with
+# TRUSTED_PROXIES set; see the ProxyFix note above. Left unset, every client
+# shares one address bucket, which is why that bucket is sized as a backstop and
+# the device bucket is the limit that actually does the work.
+
+_DEVICE_COOKIE  = 'did'
+_DEVICE_MAX_AGE = int(_timedelta(days=365).total_seconds())
+# Shape-checked because it reaches a dict key: an unbounded cookie value is an
+# unbounded key. Same reasoning as clean_username(), one layer down.
+_DEVICE_RE = __import__('re').compile(r'^[A-Za-z0-9_-]{16,64}$')
+
+# (burst, per minute). The burst is what a page load spends at once; the rate is
+# what a script settles down to. The default is generous on purpose — it is a
+# ceiling on total volume, not a throttle a human should ever notice — while the
+# named entries below are sized against what one request actually costs.
+_RATE_DEFAULT = (150, 180)
+
+# How much more the whole address may spend than one device on it.
+_ADDR_FACTOR = 4
+
+_RATE_LIMITS = {
+    # Password hashing. scrypt at 32768:8:1 is ~100ms and ~32MB by design, so
+    # these are the routes where a plain loop is a memory-and-CPU DoS. The login
+    # lockout above stops a *guessing* run; this stops the cost of one.
+    'api_login':            (10, 10),
+    'api_change_password':   (5, 10),
+    'admin_create_user':    (10, 20),
+    'admin_update_user':    (20, 40),   # can reset a password, so it hashes too
+
+    # A subprocess with a six-minute timeout. See REPORT_MAX_CONCURRENT below:
+    # a rate limit alone still lets a handful of them stack up, because the cost
+    # is in how long each one lives, not in how often it is asked for.
+    'generate_report':       (3,  2),
+
+    # Third-party work per request. Held below what the upstream would notice:
+    # being rate-limited by Yahoo degrades every other tab, not just this one.
+    'get_stock':            (15, 30),
+    'get_chart':            (20, 40),
+    'crosslist':            (20, 40),
+    'insider_buying':       (10, 20),
+    'canada_drops':          (5, 10),
+    'movers':               (10, 20),
+    'ticker_tape':          (20, 40),
+    'search_tickers':       (30, 90),   # typeahead, debounced at 200ms
+    'single_quote':         (30, 60),
+    'batch_quotes':         (30, 60),
+
+    # Spends an API key — the account's own, but still money.
+    'get_news':              (8, 15),
+    'get_market_news':       (6, 10),
+    'get_positions_news':    (6, 10),
+
+    # Scrapes with no cache in front of them.
+    'debug_dividend':       (10, 20),
+    'debug_cashflow':       (10, 20),
+    'debug_macrotrends':    (10, 20),
+    'debug_raw_series':     (10, 20),
+}
+
+# key -> [tokens, last_refill_epoch, capacity, tokens_per_sec]. Capacity and
+# rate are stored rather than looked back up so that eviction can tell an idle
+# bucket from a drained one exactly, instead of guessing with a timeout.
+_rate_buckets: dict = {}
+_rate_buckets_lock = threading.Lock()
+
+# A new device cookie is a new key, so the table needs a ceiling for the same
+# reason _login_fails does.
+_RATE_BUCKETS_MAX = 8192
+
+
+def _device_id():
+    """This browser's opaque bucket key, minted on first sight.
+
+    The value carries no claim, so it is not signed: forging one only moves you
+    to a different bucket, and bounding *that* is the per-address bucket's job.
+    """
+    got = getattr(g, 'device_id', None)
+    if got:
+        return got
+    raw = request.cookies.get(_DEVICE_COOKIE, '')
+    if not _DEVICE_RE.match(raw or ''):
+        raw = _secrets.token_urlsafe(16)
+        g.device_new = True
+    g.device_id = raw
+    return raw
+
+
+def _rate_tokens(key, capacity, rate, now):
+    entry = _rate_buckets.get(key)
+    if entry is None:
+        return float(capacity)
+    # max(0.0, ...) so a clock stepping backwards cannot mint tokens.
+    return min(float(capacity), entry[0] + max(0.0, now - entry[1]) * rate)
+
+
+def _rate_evict(now):
+    """Drop buckets that have fully refilled.
+
+    A full bucket answers every question identically to one that was never
+    created, so forgetting it is not the same as forgetting a limit.
+    """
+    for key, (tokens, last, capacity, rate) in list(_rate_buckets.items()):
+        if tokens + max(0.0, now - last) * rate >= capacity:
+            _rate_buckets.pop(key, None)
+
+
+def _rate_consume(specs):
+    """Spend one token from every bucket in `specs`, or from none of them.
+
+    Returns seconds to wait, or 0 to proceed. A refusal spends nothing: charging
+    the device bucket for a request the address bucket already refused would let
+    one noisy client drain every other device on that address without a single
+    request getting through.
+
+    A token bucket rather than a counter per fixed window — a window boundary
+    lets two full allowances through back to back, and it cannot say how long
+    the caller should wait without being wrong by up to a whole window.
+    """
+    now = _time_mod.time()
+    with _rate_buckets_lock:
+        if len(_rate_buckets) >= _RATE_BUCKETS_MAX:
+            _rate_evict(now)
+
+        wait = 0
+        for key, capacity, per_min in specs:
+            rate = per_min / 60.0
+            tokens = _rate_tokens(key, capacity, rate, now)
+            if tokens < 1.0:
+                wait = max(wait, int((1.0 - tokens) / rate) + 1)
+        if wait:
+            return wait
+
+        for key, capacity, per_min in specs:
+            rate = per_min / 60.0
+            tokens = _rate_tokens(key, capacity, rate, now)
+            _rate_buckets[key] = [tokens - 1.0, now, float(capacity), rate]
+        return 0
+
+
+def _rate_specs(endpoint):
+    """The buckets one request draws on: its own endpoint's, and the default.
+
+    A named endpoint spends from both, so the default stays a true ceiling on
+    total volume rather than something an expensive route can step around.
+    """
+    device = _device_id()
+    addr   = request.remote_addr or '?'
+    scopes = [('*', _RATE_DEFAULT)]
+    named  = _RATE_LIMITS.get(endpoint)
+    if named:
+        scopes.append((endpoint, named))
+
+    specs = []
+    for scope, (capacity, per_min) in scopes:
+        specs.append((f'd:{scope}:{device}', capacity, per_min))
+        specs.append((f'a:{scope}:{addr}',
+                      capacity * _ADDR_FACTOR, per_min * _ADDR_FACTOR))
+    return specs
+
+
+@app.before_request
+def _rate_limit_gate():
+    """Bound how fast one device can spend server time.
+
+    Registered before the login gate, and that order matters: _current_user()
+    re-reads the account file on every request, so a refusal belongs in front of
+    that work rather than behind it.
+    """
+    endpoint = request.endpoint
+    if endpoint is None or endpoint == 'static':
+        return None
+    wait = _rate_consume(_rate_specs(endpoint))
+    if not wait:
+        return None
+    print(f'[RATE] {endpoint} refused for {request.remote_addr} '
+          f'(retry in {wait}s)', flush=True)
+    return _rate_limited(wait)
+
+
+def _rate_limited(wait):
+    """429 with a Retry-After the caller can actually act on."""
+    if _wants_json():
+        resp = jsonify({'error': f'Too many requests. Try again in {wait} second(s).',
+                        'rate_limited': True})
+    else:
+        resp = app.make_response(f'Too many requests. Try again in {wait} second(s).\n')
+        resp.mimetype = 'text/plain'
+    resp.status_code = 429
+    resp.headers['Retry-After'] = str(wait)
+    return resp
+
+
+@app.after_request
+def _issue_device_cookie(resp):
+    """Hand out the device id, including on the 429 that refused the request —
+    otherwise a limited client never gets one and every retry draws a fresh
+    bucket."""
+    if getattr(g, 'device_new', False):
+        resp.set_cookie(_DEVICE_COOKIE, g.device_id,
+                        max_age=_DEVICE_MAX_AGE, httponly=True,
+                        samesite='Lax', secure=_SECURE_COOKIE)
+    return resp
+
+
 @app.before_request
 def _require_login():
     """Deny by default. See the section header for why this is not a decorator."""
@@ -5051,7 +5444,7 @@ def _start_session(user):
     session['uid']  = user['username']
     session['tv']   = int(user.get('token_version', 1))
     session['csrf'] = _secrets.token_urlsafe(32)
-    session.permanent = True
+    session.permanent = _SESSION_PERMANENT
 
 
 @app.route('/login', methods=['GET'])
@@ -5180,10 +5573,21 @@ def get_settings():
 def save_settings():
     # No client needs invalidating here: the key is re-read per call by
     # _resolve_api_key(), and _groq_client() rebuilds when the value changes.
+    #
+    # Three cases, and the difference between the last two is the point. A
+    # string sets the key. An empty string leaves it alone — that is what lets
+    # the Settings page post all four fields on one Save with only one of them
+    # filled in, without the three blanks wiping what is stored. Clearing is
+    # therefore an explicit JSON null, which no untouched form field produces:
+    # a key you could set but never unset was the gap that left.
     data = request.get_json(silent=True) or {}
     cfg  = _load_settings()
     for k in _SETTINGS_KEYS:
-        if k in data and isinstance(data[k], str) and data[k].strip():
+        if k not in data:
+            continue
+        if data[k] is None:
+            cfg.pop(k, None)
+        elif isinstance(data[k], str) and data[k].strip():
             cfg[k] = data[k].strip()
     _save_settings(cfg)
     return jsonify({'ok': True})
@@ -5317,7 +5721,33 @@ import uuid as _uuid
 _STOCKBOX_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'StockBox', 'StockBox')
 )
-_report_jobs: dict = {}  # job_id -> {status, ticker, pdf_path?, error?}
+_report_jobs: dict = {}  # job_id -> {status, ticker, owner, started, pdf_path?, error?}
+_report_jobs_lock = threading.Lock()
+
+# A rate limit bounds how *often* a report is asked for; it cannot bound how
+# many are running, because the cost of one is that it lives for up to six
+# minutes. Three requests a minute is polite and still stacks eighteen python
+# subprocesses. This is the cap that matters, and it is per account so one user
+# cannot starve another.
+REPORT_MAX_CONCURRENT = int(os.environ.get('REPORT_MAX_CONCURRENT', '2') or 2)
+
+# Finished jobs are kept far longer than the frontend polls for them, but not
+# forever: nothing else ever removes an entry, and the concurrency check walks
+# this dict on every request.
+_REPORT_JOB_TTL = 6 * 3600
+
+
+def _finish_report(job_id: str, **fields) -> None:
+    """Record a job's outcome without losing what generate_report() stamped on it.
+
+    Assigning a fresh dict here drops `started`, which is what the TTL prune
+    reads — the entry would then never be collected, and the concurrency check
+    walks this dict on every request.
+    """
+    with _report_jobs_lock:
+        job = dict(_report_jobs.get(job_id) or {})
+        job.update(fields)
+        _report_jobs[job_id] = job
 
 
 def _report_stem(ticker: str) -> str:
@@ -5330,10 +5760,9 @@ def _user_report_path(owner: str, ticker: str) -> str:
     """Where `owner`'s copy of the report for `ticker` lives.
 
     StockBox writes one PDF per ticker into its own output directory, so two
-    accounts building AAPL overwrite each other's file — and the report embeds
-    the requester's investment theses (STOCKBOX_THESES below), so serving that
-    shared path handed one user's private notes to whoever asked next. Each
-    account gets its own copy instead.
+    accounts building AAPL overwrite each other's file and whoever reads that
+    shared path last gets whichever build finished most recently. Each account
+    gets its own copy instead, taken as soon as the build completes.
     """
     return os.path.join(_user_data_dir(owner), 'reports',
                         f'{_report_stem(ticker)}_report.pdf')
@@ -5345,25 +5774,21 @@ def _run_report(job_id: str, ticker: str, owner: str) -> None:
         # Defence in depth: callers already validate, but this string reaches a
         # command line, so refuse anything that isn't a bare symbol.
         if clean_ticker(ticker) is None:
-            _report_jobs[job_id] = {'status': 'error', 'ticker': ticker,
-                                    'error': f'Invalid ticker: {ticker!r}'}
+            _finish_report(job_id, status='error', ticker=ticker,
+                           error=f'Invalid ticker: {ticker!r}')
             return
 
         env = os.environ.copy()
         env['PYTHONIOENCODING'] = 'utf-8'
         # This account's own keys — the report is built for them and any LLM
         # spend inside build_report.py should land on their key, not a shared one.
+        # owner= is required: this runs on a worker thread with no request, so
+        # _current_username() has no session to resolve and would (correctly)
+        # refuse rather than guess whose keys to spend.
         _cfg = _load_settings(owner)
         for _k, _v in _cfg.items():
             if _k not in env and _v:
                 env[_k] = _v
-        # Pass theses via env var to avoid cmd.exe quoting issues with spaces.
-        # owner= is required: this runs on a worker thread with no request, so
-        # _current_username() has no session to resolve and would (correctly)
-        # refuse rather than guess whose theses to embed.
-        theses = load_theses(owner=owner)
-        if theses:
-            env['STOCKBOX_THESES'] = ';'.join(theses)
 
         # No shell: argv is passed through verbatim, so nothing in `ticker` can
         # be read as a command separator. Uses this interpreter rather than
@@ -5393,31 +5818,31 @@ def _run_report(job_id: str, ticker: str, owner: str) -> None:
         proc.wait(timeout=360)
         if proc.returncode == 0:
             built = os.path.join(_STOCKBOX_DIR, 'output', f'{_report_stem(ticker)}_report.pdf')
-            # Take a private copy immediately. The shared path is overwritten by
-            # the next account to build this ticker, and the PDF carries whoever
-            # requested it's theses.
+            # Take a private copy immediately: the shared path is overwritten by
+            # the next account to build this ticker.
             mine = _user_report_path(owner, ticker)
             os.makedirs(os.path.dirname(mine), exist_ok=True)
             _shutil.copyfile(built, mine)
-            _report_jobs[job_id] = {'status': 'done', 'ticker': ticker,
-                                    'owner': owner, 'pdf_path': mine}
+            _finish_report(job_id, status='done', ticker=ticker,
+                           owner=owner, pdf_path=mine)
         else:
             detail = '\n'.join(tail).strip() or '(no output)'
-            _report_jobs[job_id] = {
-                'status': 'error',
-                'ticker': ticker,
-                'owner': owner,
-                'error': f'build_report.py exited with code {proc.returncode}.',
-                'detail': detail,
-            }
+            _finish_report(
+                job_id,
+                status='error',
+                ticker=ticker,
+                owner=owner,
+                error=f'build_report.py exited with code {proc.returncode}.',
+                detail=detail,
+            )
     except subprocess.TimeoutExpired:
         if proc is not None:
             proc.kill()
-        _report_jobs[job_id] = {'status': 'error', 'ticker': ticker, 'owner': owner,
-                                'error': 'Timed out after 6 minutes.'}
+        _finish_report(job_id, status='error', ticker=ticker, owner=owner,
+                       error='Timed out after 6 minutes.')
     except Exception as e:
-        _report_jobs[job_id] = {'status': 'error', 'ticker': ticker,
-                                'owner': owner, 'error': str(e)}
+        _finish_report(job_id, status='error', ticker=ticker,
+                       owner=owner, error=str(e))
 
 
 @app.route('/api/generate-report', methods=['POST'])
@@ -5428,7 +5853,24 @@ def generate_report():
         return jsonify({'error': 'valid ticker required'}), 400
     owner  = _current_username()
     job_id = str(_uuid.uuid4())
-    _report_jobs[job_id] = {'status': 'running', 'ticker': ticker, 'owner': owner}
+
+    # Claim the slot and register the job under one lock. Counting first and
+    # registering after leaves a window where two requests both see the same
+    # free slot and both take it.
+    now = _time_mod.time()
+    with _report_jobs_lock:
+        for jid, job in list(_report_jobs.items()):
+            if job.get('status') != 'running' and \
+                    now - job.get('started', now) > _REPORT_JOB_TTL:
+                _report_jobs.pop(jid, None)
+        running = sum(1 for job in _report_jobs.values()
+                      if job.get('status') == 'running' and job.get('owner') == owner)
+        if running >= REPORT_MAX_CONCURRENT:
+            return jsonify({'error': f'{running} report(s) already building. '
+                                     f'Wait for one to finish.'}), 429
+        _report_jobs[job_id] = {'status': 'running', 'ticker': ticker,
+                                'owner': owner, 'started': now}
+
     threading.Thread(target=_run_report, args=(job_id, ticker, owner),
                      daemon=True).start()
     return jsonify({'job_id': job_id})
@@ -5438,23 +5880,11 @@ def generate_report():
 def report_status(job_id):
     job = _report_jobs.get(job_id)
     # A job id is a uuid4 and so unguessable, but "unguessable" is not an access
-    # check — and the error `detail` is a build log that can quote the theses.
+    # check — and the error `detail` is a build log from another account's run.
     # Someone else's job reads as absent rather than forbidden.
     if not job or job.get('owner') != _current_username():
         return jsonify({'error': 'unknown job'}), 404
     return jsonify({k: v for k, v in job.items() if k != 'pdf_path'})
-
-
-@app.route('/api/rankings', methods=['GET'])
-def get_rankings():
-    path = os.path.join(_STOCKBOX_DIR, 'rankings.json')
-    try:
-        with open(path, encoding='utf-8') as f:
-            data = _json_mod.load(f)
-        entries = sorted(data.values(), key=lambda e: -e.get('score', 0))
-        return jsonify(entries)
-    except FileNotFoundError:
-        return jsonify([])
 
 
 @app.route('/api/report-file/<path:ticker>', methods=['GET'])
@@ -5463,8 +5893,8 @@ def report_file(ticker):
     tkkr = clean_ticker(ticker)
     if not tkkr:
         return jsonify({'error': 'invalid ticker'}), 400
-    # Serve this account's own copy, never StockBox's shared output file: the
-    # report embeds the theses of whoever built it.
+    # Serve this account's own copy, never StockBox's shared output file, which
+    # belongs to whichever account built this ticker most recently.
     pdf_path = _user_report_path(_current_username(), tkkr)
     if not os.path.exists(pdf_path):
         return jsonify({'error': 'PDF not found'}), 404

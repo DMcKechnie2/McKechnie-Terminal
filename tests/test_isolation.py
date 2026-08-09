@@ -23,7 +23,6 @@ PW = 'a-strong-test-password'
 # Markers that must never cross accounts. Distinctive enough that a substring
 # search over a response body is meaningful.
 ALPHA_TICKER = 'ZALPHA'
-ALPHA_THESIS = 'SECRET-THESIS-OF-ALPHA'
 ALPHA_NOTE   = 'PRIVATE-NOTE-OF-ALPHA'
 ALPHA_KEY    = 'gsk-PRIVATE-API-KEY-OF-ALPHA'
 
@@ -54,13 +53,12 @@ def two_users(tmp_path, monkeypatch):
 
 
 def _seed_alpha(alpha):
-    """Give alpha a position, a watch, a thesis, a valuation and an option."""
+    """Give alpha a position, a watch, a valuation and an option."""
     posts = [
         ('/api/watchlist',  {'ticker': ALPHA_TICKER, 'name': 'Alpha Co'}),
         ('/api/holdings',   {'ticker': ALPHA_TICKER, 'name': 'Alpha Co',
                              'shares': 10, 'price': 25.0,
                              'date_acquired': '2026-01-05'}),
-        ('/api/theses',     {'thesis': ALPHA_THESIS}),
         ('/api/valuations', {'ticker': ALPHA_TICKER, 'name': 'Alpha Co',
                              'buy_price': 20.0, 'notes': ALPHA_NOTE}),
         ('/api/options',    {'underlying': ALPHA_TICKER, 'option_type': 'call',
@@ -104,7 +102,7 @@ def test_seeded_data_landed_under_alpha_only(two_users):
     _seed_alpha(alpha)
     assert [h['ticker'] for h in terminal.load_holdings(owner='alpha')] == [ALPHA_TICKER]
     assert terminal.load_holdings(owner='beta') == []
-    assert terminal.load_theses(owner='beta') == []
+    assert terminal.load_valuations(owner='beta') == []
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +115,6 @@ def test_seeded_data_landed_under_alpha_only(two_users):
     ('/api/transactions', None),
     ('/api/options',      None),
     ('/api/valuations',   None),
-    ('/api/theses',       None),
 ])
 def test_beta_sees_an_empty_collection(two_users, path, key):
     alpha, beta = two_users
@@ -205,7 +202,7 @@ def test_positions_news_uses_only_your_own_symbols(two_users, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Reports — the PDF embeds the theses of whoever built it
+# Reports — each account reads its own copy, never StockBox's shared output
 # ---------------------------------------------------------------------------
 
 def test_report_pdf_is_per_account(two_users):
@@ -215,7 +212,7 @@ def test_report_pdf_is_per_account(two_users):
     mine = terminal._user_report_path('alpha', ALPHA_TICKER)
     os.makedirs(os.path.dirname(mine), exist_ok=True)
     with open(mine, 'wb') as f:
-        f.write(b'%PDF-1.4 alpha report containing ' + ALPHA_THESIS.encode())
+        f.write(b'%PDF-1.4 alpha report containing ' + ALPHA_NOTE.encode())
 
     assert alpha.get(f'/api/report-file/{ALPHA_TICKER}').status_code == 200
     assert beta.get(f'/api/report-file/{ALPHA_TICKER}').status_code == 404
@@ -290,7 +287,7 @@ def test_market_data_is_shared(two_users, monkeypatch):
 # every_per_user_route below is for.
 _PER_USER_GETS = [
     '/api/watchlist', '/api/holdings', '/api/transactions', '/api/sales',
-    '/api/options', '/api/valuations', '/api/theses', '/api/cash',
+    '/api/options', '/api/valuations', '/api/cash',
     '/api/settings', '/api/portfolio/invested', '/api/portfolio/performance',
     '/api/dividends', '/api/holdings/chart?range=1Y', '/api/news/positions',
 ]
@@ -308,7 +305,7 @@ def test_no_marker_of_alphas_appears_anywhere_for_beta(two_users, monkeypatch):
         res = beta.get(path)
         assert res.status_code == 200, f'{path} -> {res.status_code}'
         body = res.get_data(as_text=True)
-        for marker in (ALPHA_TICKER, ALPHA_THESIS, ALPHA_NOTE, ALPHA_KEY):
+        for marker in (ALPHA_TICKER, ALPHA_NOTE, ALPHA_KEY):
             if marker in body:
                 leaks.append(f'{path} leaked {marker}')
     assert leaks == [], '\n'.join(leaks)

@@ -28,9 +28,37 @@ def test_stock_lookup_returns_full_payload(client):
     assert r.status_code == 200
     d = r.get_json()
     assert 'error' not in d
-    for key in ('ticker', 'name', 'price', 'currency', 'market_cap', 'fcf_annual'):
+    for key in ('ticker', 'name', 'price', 'currency', 'financial_currency',
+                'currency_symbol', 'financial_currency_symbol', 'same_currency',
+                'market_cap', 'fcf_annual'):
         assert key in d, f'missing {key}'
     assert isinstance(d['price'], str)
+
+
+def test_a_won_filer_is_not_labelled_in_dollars(client):
+    """SK hynix files in won. Its revenue is genuinely in the tens of trillions
+    KRW — the figure was never wrong, but rendering it as '$189.17T' made it
+    read as the largest company in history."""
+    d = client.get('/api/stock?ticker=000660.KS').get_json()
+    assert d.get('financial_currency') == 'KRW'
+    for field in ('market_cap', 'revenue_ttm', 'debt'):
+        value = d.get(field)
+        if value and value != 'N/A':
+            assert '$' not in value, f'{field} still dollar-signed: {value}'
+            assert value.startswith('₩'), f'{field} not in won: {value}'
+
+
+def test_an_adr_labels_its_two_currencies_apart(client):
+    """TSM trades in USD and files in TWD, so one symbol cannot serve the whole
+    page: market cap is dollars, revenue is New Taiwan dollars."""
+    d = client.get('/api/stock?ticker=TSM').get_json()
+    assert d.get('currency') == 'USD'
+    assert d.get('financial_currency') == 'TWD'
+    assert d.get('same_currency') is False
+    assert d['market_cap'].startswith('$')
+    assert d['revenue_ttm'].startswith('NT$')
+    # The cross-currency ratio is suppressed rather than reported ~31x off.
+    assert (d.get('balance_sheet') or {}).get('price_to_tangible_book') is None
 
 
 def test_cached_lookup_is_faster_and_keeps_the_same_shape(client):
@@ -173,6 +201,70 @@ def test_insider_excluded_counts_are_reported(client):
     excluded = d.get('excluded') or {}
     assert excluded, 'expected buybacks/vesting to be reported, not silently dropped'
     assert all(isinstance(v, int) for v in excluded.values())
+
+
+def test_a_listing_yahoo_has_no_ownership_for_reports_none(client):
+    """Yahoo returns no ownership fields for most non-US listings and has no
+    fallback (`major_holders` is empty for them too). The section must be absent
+    rather than reading 0% institutional, which used to leave `retail` at 100%
+    and draw a doughnut claiming GOOG.TO is entirely retail-held.
+
+    Canary, not a rule about GOOG.TO: if Yahoo ever starts reporting these, the
+    split simply has to be coherent instead of missing.
+    """
+    own = client.get('/api/stock?ticker=GOOG.TO').get_json().get('ownership')
+    if own:
+        assert own.get('institutional'), 'ownership present but institutional is 0/None'
+    else:
+        assert own == {}
+
+
+def test_ownership_split_is_coherent_where_yahoo_reports_it(client):
+    """The three parts either form a whole or say they cannot."""
+    own = client.get('/api/stock?ticker=AAPL').get_json().get('ownership')
+    assert own, 'AAPL should have ownership data'
+    assert own['exceeds_outstanding'] is False
+    total = own['institutional'] + own['insider'] + own['retail']
+    assert abs(total - 100) < 0.01, f'parts sum to {total}, not 100'
+
+
+def test_an_adr_still_reports_float_and_shares_out_on_different_bases():
+    """The precondition `_FLOAT_BASIS_MAX` exists for. Yahoo quotes TSM's
+    `floatShares` on the ordinary-share basis (37.8B) and everything else on the
+    ADR basis (5.2B) — a float 7.3x the share count, which is impossible when
+    both count the same thing.
+
+    Canary, not a rule about TSM: if Yahoo ever puts the two on one basis the
+    guard stops firing on its own, and this is how we find out rather than
+    wondering later why a suppressed percentage came back.
+    """
+    info = terminal.yf.Ticker('TSM').info
+    float_sh, out_sh = info.get('floatShares'), info.get('sharesOutstanding')
+    assert float_sh and out_sh, 'TSM should report both share counts'
+    assert float_sh > out_sh * terminal._FLOAT_BASIS_MAX, (
+        f'float {float_sh:,} no longer exceeds the {out_sh:,} share count — '
+        'Yahoo may have moved the two onto one basis')
+
+
+def test_short_interest_percentages_stay_the_right_way_round(client):
+    """The float is a subset of the shares outstanding, so a percentage *of
+    float* can never sit below the percentage of shares outstanding. Dividing
+    across two bases is exactly what breaks that: TSM's ordinary-share float
+    puts 0.09% beside 0.64% of the receipts.
+
+    Yahoo currently supplies `shortPercentOfFloat` for TSM, already on the ADR
+    basis and passed through untouched, so what this pins is the served pair
+    staying coherent — no live ADR exercises the fallback today.
+    `test_short_percent_of_float_is_dropped_when_the_bases_disagree` covers that
+    offline.
+    """
+    si = client.get('/api/stock?ticker=TSM').get_json().get('short_interest')
+    assert si and si.get('pct_of_outstanding'), 'TSM should have short interest'
+    if si.get('pct_of_float') is not None:
+        assert si['pct_of_float'] >= si['pct_of_outstanding'] * 0.95, (
+            f"{si['pct_of_float']}% of float sits below "
+            f"{si['pct_of_outstanding']}% of shares outstanding — the two are "
+            'being computed on different share bases')
 
 
 # ---------------------------------------------------------------------------

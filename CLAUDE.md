@@ -46,6 +46,65 @@ explicit edit to a set that a test asserts on.
 `admin_required` re-checks the session rather than trusting the gate, so an admin
 route stays closed even if its endpoint is ever added to the allowlist.
 
+**The rate limiter is the same shape as the gate, and for the same reason.**
+`_rate_limit_gate()` is a second `before_request` hook, registered ahead of
+`_require_login` so a refusal lands in front of `_current_user()` — which
+re-reads the account file on every request. Every route draws on a default
+bucket (`_RATE_DEFAULT`) because it exists; `_RATE_LIMITS` holds the tighter
+per-endpoint numbers. A route added later is limited without anyone remembering
+to limit it, which matters because the expensive routes here do not look
+expensive from outside: `/api/stock` fans out into five Macrotrends scrapes,
+`/api/news` spends an LLM key across ~135 threads, `/api/generate-report` starts
+a six-minute subprocess. A named endpoint spends from **both** its own bucket and
+the default, so the default stays a real ceiling rather than something an
+expensive route steps around. A typo in a `_RATE_LIMITS` key is silent — the
+route just keeps the default — so a test asserts every key names a live endpoint.
+
+**The bucket is per device, and the device id is deliberately not in the
+session.** `session.clear()` runs on both login *and* logout, so an id stored
+there would refund the whole allowance to anyone who signed out and back in —
+and the login route, which has no account yet, is where a limit is worth the
+most. `did` is an opaque random cookie, HttpOnly, shape-checked on the way in
+(`_DEVICE_RE`) because it reaches a dict key. It is not signed: the value
+carries no claim, so forging one only moves you to a different bucket.
+
+Bounding *that* is the second, coarser per-address bucket — `_ADDR_FACTOR` times
+the device allowance, so several real devices behind one address never meet it
+while a loop minting a fresh cookie per request meets it after that factor. Both
+are consulted and the stricter wins, the same "worst of these keys" rule
+`_login_locked()` uses. A refusal spends **nothing**: charging the device bucket
+for a request the address bucket already refused lets one noisy client drain
+every other device on that address without a single request getting through.
+
+Behind a proxy the address half only means anything with `TRUSTED_PROXIES` set —
+see the ProxyFix note. Unset, every client shares one address bucket, which is
+why that one is sized as a backstop and the device bucket does the real work.
+
+Token buckets, not counters per fixed window: a window boundary lets two full
+allowances through back to back, and it cannot answer "how long until I may
+retry" without being wrong by up to a whole window. `Retry-After` is on every
+429, and the frontend's `fetch` wrapper surfaces it — same argument as the 401
+it already handles, since a silently refused call renders as an empty panel.
+
+**A rate limit cannot bound `/api/generate-report`; `REPORT_MAX_CONCURRENT`
+does.** The cost of a report is that it lives for up to six minutes, not that it
+is asked for often — three requests a minute is polite and still stacks eighteen
+python subprocesses. The cap is per account so one user cannot starve another,
+and the slot is claimed under `_report_jobs_lock` in the same critical section
+that registers the job: counting first and registering after leaves a window
+where two requests both see the same free slot. Outcomes go through
+`_finish_report()` rather than assigning a fresh dict, because that dropped the
+`started` stamp the TTL prune reads — and nothing else ever removes an entry from
+a table the concurrency check walks on every request.
+
+**Tests reset the buckets; they do not switch the limiter off.** `conftest.py`
+clears `_rate_buckets` around every test, because the test client keeps its
+cookies and is always `127.0.0.1` — so without it the whole suite shares one
+bucket and the 448th request pays for the first, surfacing as an unrelated test
+going red once somebody adds a few more. Same rule as the auth bypass: it lives
+entirely in test code, and `app.py` has no flag that disables the limiter.
+`tests/test_rate_limit.py` is the file that opts back in and drives it.
+
 **Per-user data is separated by directory, not by an `owner` column.**
 Every portfolio file lives at `<data dir>/users/<username>/<file>.json` and is
 reached through `_user_store()`; `load_holdings()` and friends resolve the
@@ -68,13 +127,13 @@ Adding a per-user file means calling `_register_user_file()` at its definition
 site — which is also what puts it in the isolation sweep's coverage check.
 
 **A report belongs to the account that built it.** StockBox writes one PDF per
-ticker into its own output directory, and `_run_report` passes the requester's
-theses in through `STOCKBOX_THESES` — so serving that shared path handed one
-user's private notes to whoever asked for the same ticker next. The PDF is
-copied to `users/<name>/reports/` on completion and `/api/report-file` serves
-only that copy. `_report_jobs` entries carry an `owner` and answer 404 to anyone
-else: a uuid4 job id is unguessable, but unguessable is not an access check, and
-the error `detail` is a build log that can quote the theses.
+ticker into its own output directory, so two accounts building AAPL overwrite
+each other's file and serving that shared path hands back whichever build
+finished most recently. The PDF is copied to `users/<name>/reports/` on
+completion and `/api/report-file` serves only that copy. `_report_jobs` entries
+carry an `owner` and answer 404 to anyone else: a uuid4 job id is unguessable,
+but unguessable is not an access check, and the error `detail` is a build log
+from another account's run.
 
 **API keys are per account, and there is no shared fallback — including the
 environment.** `settings.json` is a per-user file like the portfolio ones, and
@@ -86,6 +145,15 @@ honest, rather than quietly spending someone else's key. `/api/settings` takes
 the account from the session and never from the payload, so no request shape
 reads or writes another user's keys — and an administrator has no more access
 here than anyone else. Administering accounts is not reading their credentials.
+
+**On `POST /api/settings`, `''` and `null` are not the same thing.** The
+Settings page posts all four key fields on one Save with usually one of them
+filled in, so an empty string has to mean "leave this one alone" — read as
+"clear it" instead, saving a DeepSeek key wipes the three the user did not
+retype. Clearing therefore needs a signal no untouched form field can produce,
+and that is JSON `null`, which the Remove control on each key card sends. Do
+not collapse the two into one falsy test; a key that can be set but never unset
+is what that asymmetry buys out of.
 
 **A key is passed to the code that spends it; it is never reached for.**
 `groq_call(..., key=)` and `_filter_relevant(items, backend)` take the
@@ -144,6 +212,34 @@ returning the record directly puts an offline-crackable hash on the wire.
 come from `POST /api/admin/users` (admin only) or the CLI. `clean_username()`
 guards the shape the way `clean_ticker()` guards a symbol, and for the same
 reason — a username reaches JSON keys, log lines and URL paths.
+
+**Administration is its own tab, and the server decides whether it exists.**
+Managing other people's accounts used to be a third section on Settings, hidden
+with `display:none` for four accounts in five — so the page had a different
+shape depending on who was looking, and a plain user still received the user
+table and the create-account form and could unhide both from the console. It is
+`#admin-page` now, behind an `{% if is_admin %}` in the template along with its
+nav button, so a non-admin's document does not contain it at all.
+
+This is not the access check and must not be mistaken for one: `admin_required`
+on every `/api/admin/*` route is, and it re-reads the session rather than
+trusting anything the page says. The Jinja gate is about not shipping a door to
+someone who cannot open it. The four JS functions behind it (`loadUsers`,
+`createUser`, `setUserDisabled`, `deleteUser`) are deliberately *not* gated —
+they are inert without the markup, every route they call answers 403, and
+hiding them would add the appearance of a check rather than a check.
+
+Two consequences. `_hideAllPages()` runs on every navigation and is the one
+page-hide site, so `#admin-page` is the single element there that needs a null
+guard — a bare `getElementById(...).style` would be correct for an admin and a
+TypeError that breaks all navigation for everyone else. And `goAdmin()` returns
+early when the page is absent, since the console is the only way to reach it
+without a button.
+
+Settings keeps what belongs to *you* — identity, password, your own API keys.
+That division is the same one `/api/settings` already enforces by taking the
+account from the session: administering an account is not reading its
+credentials.
 
 **A session is checked against the record, not just the cookie.** The cookie is
 signed, so its contents are authentic — but they are a snapshot. `_current_user()`
@@ -295,6 +391,42 @@ Holdings always did. Income changes the sign on real positions: T.TO reads
 `_dividend_payments()` is the one walk behind both the Dividends tab and this,
 for the same reason `sales.json` is not allowed a second opinion on P/L.
 
+**The TWR tile is chain-linked daily, and Modified Dietz is not a substitute.**
+`/api/holdings/chart` labelled a Dietz number "time-weighted". They answer
+different questions: money-weighted asks what the *investor* earned including
+the effect of when capital arrived, time-weighted strips that out and asks what
+the *holdings* did. On this book over nine months they read +25.55% and +27.75%;
+the gap grows without bound as contributions grow against the opening balance
+(double $1k, add $100k, drop 10% — the two report +80% and −84% on one
+portfolio on one day). A test drives one security through two funding schedules
+and requires one answer; the staggered ledger returned −51.24% against a true
+−10% before the fix.
+
+Dietz is the approximation for when you *lack* periodic valuations and have to
+assume flows land at an average moment. `values_out` is a daily valuation
+series, so there is nothing to approximate:
+
+    r_i = V_i / (V_{i−1} + C_i)        TWR = Π r_i − 1
+
+`C_i` is external capital only — sale proceeds, dividends and closed-option
+gains stay inside the portfolio and belong to the return, which is what
+`invested_out` already encodes. It belongs in the *denominator* because the walk
+applies each day's transactions before valuing at that day's close: the new
+money is already inside `V_i`, so leaving it out of the base books the
+contribution itself as a gain. Day 0 sets the opening balance and carries no
+return — there is no prior close to measure it against.
+
+Flows are assumed to arrive at the start of their day, the one place a
+convention is still needed, since transactions carry a date and no time. The
+alternative — `(V_i − C_i) / V_{i−1}` — drops the flow's own intraday P/L out of
+the return entirely rather than merely mistiming it.
+
+**Sub-year returns are not annualized** (GIPS 5.A.4). `annualized_twr` is null
+below 365 days, and the frontend falls back to the period return, so the gate
+lives in `app.py` rather than the template — the old template threshold of 14
+days raised a 29-day return to the 12.6th power and printed +96.22% as the
+largest number on the page.
+
 **Cash is derived. There is no cash store and no setter.** `load_cash()` returns
 the `cash_pool` leg of `_compute_invested()`; `/api/cash` GET reports it and POST
 answers 410.
@@ -336,6 +468,56 @@ names are scraped third-party text — some of it LLM-rewritten — and go into
 **Send both `raw` and `value`.** `raw` is the true float, `value` the display
 string. Charts must read `raw`; parsing the formatted string back into a number
 quantises every data point to 2dp of its unit.
+
+**A money figure carries the currency it is actually in, and the stock page has
+two of them.** `currency` is what the *listing* trades in; `financialCurrency`
+is what the company *files* in. Price, market cap, street targets, dividends per
+share, insider trade values and `trailingEps` follow the listing. Revenue,
+earnings, FCF, capex, the balance sheet and the by-year EPS series follow the
+filing. They are the same for a domestic listing and different for **every ADR**
+— TSM quotes in USD and reports in TWD, Sony in USD and JPY, BABA in USD and CNY.
+
+`format_large_number(value, symbol='$')` takes the prefix and `_currency_symbol()`
+maps the code; the default keeps portfolio code, which is always in the account's
+own money, untouched. An unmapped currency falls back to its ISO code
+(`SEK 4.50B`) and never to `$`, because a wrong unit reads as a real number.
+CNY is `CN¥` so it cannot be mistaken for JPY, and `GBp` is pence — a real unit
+1/100th of GBP, not a typo for it.
+
+The hardcoded `$` is what surfaced this: SK hynix files in won, so its ₩189T of
+TTM revenue rendered as "$189.17T" — larger than any company has ever billed, and
+nothing on the page gave a reader a way to catch it. The figures were right; only
+the symbol lied. The ADR case is worse, because two currencies appear on one page
+under one symbol: TSM's revenue read "$4440.49B" against a real ~$140B.
+
+**A ratio may not span the two.** This is the half that is silently wrong rather
+than merely mislabelled, because a ratio carries no unit to give it away:
+
+- `price_to_tangible_book` divided price (USD) by book per share (TWD) and landed
+  ~31x off. It is now `None` when the currencies differ.
+- Profit margin was overridden with `trailingEps × shares / totalRevenue` —
+  USD earnings over TWD revenue, printing TSM's ~38% net margin as **1.33%** and
+  Sony's as 0.05%. The override now requires `same_currency`; otherwise Yahoo's
+  own `profitMargins`, which is unit-free, stands.
+
+Suppressed rather than converted, deliberately: a live FX rate applied to a filed
+balance sheet invents a figure that appeared on no statement, and applying today's
+rate to a 2019 income statement is worse.
+
+The two analyst estimate frames are **not** necessarily in the same currency and
+each carries its own `currency` column — Yahoo returns TSM's EPS estimates in USD
+per ADR and its revenue estimates in TWD, in one lookup. The frame's column wins;
+the passed symbol is only the fallback.
+
+The frontend builds its own chart labels off `raw`, so it gets the same split via
+`_curSym = {trade, fin}`, set from the payload before anything renders. Portfolio
+formatters are left on `$` — that is the account's money, not a filer's.
+
+Not fixed, and upstream: Yahoo's TTM fields for 000660.KS disagree with its own
+quarterlies (`totalRevenue` 189T KRW against 132T summed, `netIncomeToCommon`
+162T against 75T), which is why its margin reads 85.68%. That is a Yahoo data
+problem, not a formatting one — don't "correct" it by inventing a different
+basis.
 
 **Batch per-symbol requests.** The browser allows ~6 connections per host, so a
 burst of single-symbol calls starves whatever the user is actually waiting for.
@@ -381,6 +563,40 @@ absent rows are the normal case — a shape that varies by filer pushes "missing
 or zero?" onto each consumer. Leverage and coverage bands are skipped for
 Financial Services in the frontend for the same reason `Net Debt / FCF` opts
 out: 4x debt-to-equity is unremarkable for a bank.
+
+**The ownership split has no ambient zero, and no clamp.** `_build_ownership`
+owns both halves. The three parts are the right shape — Yahoo's own
+`institutionsFloatPercentHeld` is `heldPercentInstitutions / (1 -
+heldPercentInsiders)` to five decimals on every ticker checked, so institutions
+hold out of the float and insiders hold the rest, and the remainder is genuinely
+retail. What broke was the arithmetic laid over it, in two directions.
+
+*Missing was read as zero.* Yahoo reports neither field for most non-US
+listings — the same gap `_build_short_interest` documents for
+`shortPercentOfFloat`, and here there is no fallback either, since
+`ticker.major_holders` comes back an empty frame for the same symbols. The old
+`info.get(...) or 0` turned that into 0% institutional, so `retail` fell out of
+`1 - 0 - 0` at **100%** and the frontend's `> 0` guard passed on the strength of
+that fabricated 100. GOOG.TO, MSFT.TO, META.TO and LULU.TO each drew a full
+doughnut saying they are entirely retail-held — four of the ten symbols in this
+account's portfolio, and Alphabet is ~81% institutional. The builder returns
+`{}` now and the existing empty state shows.
+
+*Over 100% was clamped.* Institutional legitimately exceeds shares outstanding
+because 13F filings double-count lent shares — the lender still reports a
+position the short buyer now also reports — so WING reads 123%, CARG 112%, ZG
+107%, CVNA 106%. Six of twelve US names sampled. That is real information about
+share lending, so the figure is kept as reported; what cannot survive is
+`retail`, which is `None` rather than 0 because a clamped 0 asserts "no retail
+float", a claim the data does not make. `exceeds_outstanding` carries that to
+the frontend, which drops the doughnut and shows a note. It has to: Chart.js
+renormalises whatever it is handed, so the old code printed "123.2%" in the
+legend beside a slice drawn as 99% — the error made invisible by the chart.
+
+Suppressed rather than reconciled, the same call as a cross-currency ratio:
+scaling the three to sum to 100 invents a number that appeared in no filing. The
+frontend rule follows from it — a part is rendered only when it is a number, so
+a null never reaches `toFixed()` as a fabricated `0.0%`.
 
 **"Other exchanges" means a different exchange, and Yahoo's search will not
 tell you.** `/api/crosslist` feeds the switcher under the company name. Yahoo
@@ -441,8 +657,25 @@ yfinance on the overlapping years.
 **Yahoo is a hard ceiling at ~5 annual columns.** `ticker.financials` and
 `ticker.cashflow` return five, and Yahoo's own `fundamentals-timeseries` endpoint
 returns four even with `period1` set to 1985. There is no parameter that widens
-it. Macrotrends serves fourteen, which is why it exists here at all — don't spend
-time trying to coax more years out of yfinance.
+it. Macrotrends is why there is a longer chart at all — don't spend time trying
+to coax more years out of yfinance.
+
+**Macrotrends' fourteen years were its default, not its limit — `yb` is the
+parameter.** Unset, the endpoint returns fourteen, which reads exactly like a
+ceiling and was taken for one. Apple's own chart page embeds the iframe with
+`yb=15`; it is honoured far past that, and `_MT_YEARS_BACK = 40` reaches Apple's
+1987. The extra years are free — same ~10KB response, same ~0.15s, whether it
+carries fourteen rows or thirty-nine — so it is sent for every metric rather
+than tuned per chart, and Macrotrends truncates at its own coverage instead of
+padding (NVIDIA starts at fiscal 1999, the year it listed).
+
+Checked before raising it, and worth rechecking if it moves: across ten tickers
+and all five series, every value the old request returned is byte-identical in
+the wider one. `yb` only prepends older rows, so it cannot move a year the gate
+validates against. **Losing this parameter is silent** — every chart shortens
+back to fourteen with no error, no empty series and no log line, and the merge
+still passes because the years it checks come back either way. A test asserts
+the request carries it.
 
 **A scraped series is taken or dropped whole, never spliced.** `_mt_check`
 compares Macrotrends against yfinance on the overlapping years and
@@ -451,12 +684,21 @@ loose (10%, one divergent year forgiven when there are three or more to compare)
 because yfinance carries restatements where Macrotrends is as-reported: this is a
 check for gross errors — wrong company, thousandfold unit slip, split-adjusted
 pasted onto as-filed, the v1 year shift — not a reconciliation. Measured over a
-15-ticker basket it accepts 44 of 45 series and adds ten years to each. The one
-rejection is Amazon's FCF, where the two sources net capital leases differently
-on all four overlap years; splicing those would put a definitional step change
-mid-chart that reads as a real swing in the business. A rejection is logged, not
-silent, because a dropped series looks exactly like a ticker Macrotrends doesn't
-carry.
+15-ticker basket it accepts 44 of 45 series; how much an accepted one adds is
+bounded by `_MT_YEARS_BACK` and then by the company's age — 35 years for AAPL or
+KO, 24 for NVDA. Rejections all have one shape, a steady offset rather than one
+bad year: AMZN's FCF runs 12-31% above yfinance's on all four overlap years
+because the two net capital leases differently, XOM's 11-14% above on three of
+four. Splicing those would put a definitional step change mid-chart that reads
+as a real swing in the business. A rejection is logged, not silent, because a
+dropped series looks exactly like a ticker Macrotrends doesn't carry.
+
+The gate only ever sees the four or five years yfinance also carries, so it
+judges a whole series on its most recent tail and admits everything behind it on
+that evidence — an asymmetry that widening the window deepened. It holds because
+every error it exists to catch is a property of the whole series and shows on
+any overlap. A one-off bad year deep in the unvalidated past would not be
+caught, and never was.
 
 **Macrotrends dates a column the same way yfinance does**, so `_mt_years` buckets
 the scrape with `_fiscal_year` — the same rule the statement frames go through —
@@ -560,6 +802,14 @@ key saved through `POST /api/settings` never reaches `groq_call()`. Resolving pe
 call means pasting a key into Settings takes effect on the next build with no
 restart.
 
+**There is one LLM path, and it is hosted.** `/api/chat` and its local Ollama
+backend are gone — a second integration with a different shape (an unversioned
+model pulled by `setup.bat`, a key that was an environment variable rather than
+an account's, an error string telling the user to run `ollama serve`) was the
+"pick one path" gap, and the path picked is `_resolve_api_key()` above. Anything
+new that wants a model asks for a backend through `_llm_backend(owner)` so it
+degrades the same way everything else does when an account has no key.
+
 **The positions feed uses `_build_news(..., lite=True)`.** That exit returns after
 filtering and scoring — one yfinance call — instead of scraping ten article bodies
 and paying for a Groq rewrite per item. Across nine symbols the full path would be
@@ -573,12 +823,128 @@ its own copy which had already drifted (it never hid `settings-page`, so searchi
 a ticker from Settings left it on screen). Adding a page means touching that one
 function.
 
+**A canvas hit test is in CSS pixels, and there is one of them.**
+`makeBarDragger()` is the press-sweep-read-back mechanic behind both drag
+plugins — the average on the earnings and FCF charts, the average YoY growth on
+the dividend chart. It used to be a copy inside each, and the copy is where the
+bug lived.
+
+`bar.x` is a CSS pixel offset. Chart.js sizes the backing store at
+`canvas.width = CSS width x devicePixelRatio` and scales the context to match,
+so scaling the pointer by `canvas.width / rect.width` — which both copies did —
+measures the cursor in device pixels and compares it against bars in CSS pixels.
+The selection lands `devicePixelRatio` times too far right and drifts further
+the further right you press. At 150% Windows display scaling, the default on
+most laptops, pressing 2018 on a twelve-year dividend chart selected 2020 and
+the right-hand third of the chart could not be reached at all. **At dpr 1 the
+factor is 1 and it is exact**, which is why it looked correct wherever it was
+written and only broke on the machines it shipped to. Verified across 78
+press/sweep pairs at each of dpr 1, 1.25, 1.5 and 2.
+
+**A plugin that adds DOM listeners must remove them in `afterDestroy`.** The
+same fix's other half. These listeners sit on the canvas, and the canvas is a
+fixed element `makeScrollableChart()` looks up by id and reuses — so `destroy()`
+does not take them with it. Every ticker search left another set attached, each
+closed over a destroyed chart and throwing out of `chart.update()` on every
+mousemove of every later drag, and each one pinning its dead chart in memory.
+The live handler is registered last and still ran, so the feature kept working
+while the console filled up — which is why this survived. Chart.js does fire
+`afterDestroy`; `detach()` is called from there.
+
+**A corner radius is a token, the same way a colour is.** `--r-sm` / `--r` /
+`--r-lg` / `--r-pill` — chip, control, container, bar — and no rule anywhere
+writes a literal. The tokens already existed and exactly one rule read them, so
+the file had drifted to 2px, 3px and 4px chosen per site: three buttons doing
+the same job at three radii, and nothing for a new one to copy. The scale is
+`login.html`'s, because that view was written later and was already rounded —
+you signed in through a 10px card and landed on square panels.
+
+Two things move with the radius rather than after it. `.grid`'s gap went 2px →
+8px: at 2px the metric boxes read as one slab ruled into cells, which is why
+square corners suited them, and rounding at that spacing only punches four
+notches of page background into every junction. And `.table-box` gained
+`overflow: hidden`, because it is full of children that paint their own
+background into the corner — the sticky `<th>` strip, `.eh-header`,
+`.ocf-note`, the first and last news row — each of which squares the box off
+again. The clip is safe for the sticky headers: `.table-scroll` is still the
+nearest scrollport, so they keep sticking to it.
+
+Grouped controls round on the outside only, or the seam stops reading as a
+seam: `.search-input`/`.search-btn` and the `.settings-input-wrap` pair each
+take half a radius. `.search-input.open` also drops its bottom-left, since open
+it is the top half of one shape with the suggestions dropdown.
+
+The clip has a cost that only shows on a narrow viewport: a table wider than
+its box is not merely cramped, it is cut off, because there is nowhere to
+scroll to. `.table-scroll.wide` adds `overflow-x` for that case. The users list
+is what surfaced it — five columns at 561px inside a 319px box, with Delete off
+the end of the page and unreachable.
+
+**Type is a scale, and caps are furniture.** `--fs-0`…`--fs-7` live in the
+token block and `--fs-0` (10px) is the floor: nothing renders below it. Before
+the scale existed the whole app sat at 9–13px — the portfolio page's own total
+was 18px in a page holding 122 nine-pixel badges — and hierarchy was attempted
+with weight, uppercase and letterspacing alone, at nine distinct tracking
+values. That is why every page read as a flat wall of small bold labels.
+Two voices now: numbers are data and read Inter with `tabular-nums` (columns
+must not jiggle); Jakarta is identity — wordmark, tickers, panel titles,
+buttons. Uppercase + tracking survives in exactly three shapes — section
+labels, table headers, status pills — and a control says what it does in
+sentence case. A new label that wants to shout should get a size step, not a
+letter-spacing.
+
+**The header is one sticky app bar, and ids are the JS contract.** Brand, nav,
+search and the settings gear share `.appbar`, sticky below the ticker tape.
+The JS binds `#logoMark`, `#homeLink`, `#mainnav`, `#tickerInput`,
+`#suggestions`, `#searchBtn`, `#settingsBtn` and never the layout classes, so
+the bar can be recomposed freely as long as those ids survive. `#logoMark`
+(theme toggle) and `#homeLink` (go home) must stay siblings — nesting one in
+the other makes a theme toggle also navigate.
+
+**A chart panel is a theme surface, and a canvas cannot resolve `var()`.**
+`.hero-chart-wrap` was a hardcoded white card in the dark page, styled around
+Chart.js defaults. It is `--surface` now, and the price chart reads
+`--chart-grid` and `--muted` through `_cssVar()` at build time — same rule the
+doughnut's `pieColors()` already followed, and build time matters because the
+theme can toggle between two builds. A canvas gradient must fade to its own
+hue at alpha 0, not to transparent white: canvas interpolates unpremultiplied,
+so `rgba(255,255,255,0)` washes the fill milky on a dark panel.
+
+**Settings uses the page's own furniture.** It used to draw its own: a section
+heading at 0.18em against the `.section-label` every other page uses at 0.3em,
+fields laid straight onto the page background where everything else lives in a
+`--surface` panel at `--r-lg`, and a users list hand-built from flex rows with
+inline styles instead of the `<table>` that gets sticky headers and hover for
+free. It read as a different application bolted on, and a new field had two
+conflicting things to copy. Headers are `.section-label` + `.section-rule`,
+bodies are `.settings-panel`, and the only thing left in the settings CSS block
+is form layout.
+
+`.settings-btn` is one shape with three weights — `.primary` for the single
+action a panel exists for, plain for everything else, `.danger` for destructive
+— because the old `settings-reveal-btn` was Show, Sign Out, Disable *and*
+Delete, which gave "delete this account permanently" exactly the weight of
+"reveal this field".
+
+An API key's state is a pill and a masked line inside its card, not the input's
+placeholder. Placeholder colour is hint colour, so a configured key looked like
+an empty field; and a placeholder disappears the moment you type, which is
+precisely when you want to see what you are replacing.
+
 ## Important quirks
 - yfinance dividendYield is already a % (0.41 = 0.41%, not 0.41%)
 - ...but `shortPercentOfFloat` and the `growth` column of the estimate frames
   are **decimals** (0.01 = 1%, 0.2054 = 20.54%) — the opposite convention.
   Yahoo also omits `shortPercentOfFloat` for most non-US listings, so
   `_build_short_interest` recomputes it from sharesShort / floatShares
+- **`floatShares` and `sharesOutstanding` are not always the same share.** On a
+  depositary receipt Yahoo counts the float in *ordinary shares* and everything
+  else in receipts, so the recompute above mixes units — ASML would read 0.006%
+  where 0.33% of the receipts are short. A float above the share count is the
+  tell (impossible on one basis); `_FLOAT_BASIS_MAX` catches it and the
+  percentage goes to None, suppressed rather than converted since the deposit
+  ratio is nowhere in the payload. Yahoo's own `shortPercentOfFloat` is already
+  on the receipt basis and is left alone, as is `pct_of_outstanding`
 - Macrotrends units differ per metric: `net-income` and `shares-outstanding` are
   in **billions**, FCF and capex in **millions**, margin and EPS in their own
   units. Same endpoint, same field name, different scale — `_MT_SERIES` holds it.
@@ -627,9 +993,6 @@ function.
 - `_do_get_stock` is a single ~570-line function. `stock-intel` already
   implements the same data layer correctly and with tests; migrating the route
   onto it needs a field-by-field mapping against the frontend's ~50 reads.
-- `/api/chat` expects a local Ollama server (`OLLAMA_MODEL`, default
-  `qwen2-math:7b`) which is not in requirements.txt, while the app also holds
-  Groq and Anthropic keys. Pick one path.
 - Portfolio data (holdings/sales/transactions/watchlist) is committed to git.
   Fine while the repo is private; move it out before sharing. `users.json` and
   `settings.json` (at every level, including `users/<name>/settings.json`) and
@@ -639,3 +1002,10 @@ function.
 - There is no password reset by email and no MFA. `python app.py passwd <user>`
   from the machine itself is the whole recovery story, which is proportionate
   while this binds to loopback and would not be if it were ever exposed.
+- Rate-limit buckets live in process memory, so they reset on restart and are
+  not shared between workers. Fine for one Flask process on loopback; a real
+  multi-worker deployment would divide every limit by the worker count and hand
+  a restart loop a way to clear them. Redis or an equivalent shared counter is
+  the fix, and `_rate_consume()` is the one function that would change.
+  `_report_jobs` has the same property, which is why `/api/report-status` for an
+  unknown job is already a 404 rather than an error.

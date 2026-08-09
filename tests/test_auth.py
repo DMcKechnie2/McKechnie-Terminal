@@ -416,6 +416,60 @@ def test_deleting_an_unknown_user_is_404_not_a_silent_success(client, admin):
 
 
 # ---------------------------------------------------------------------------
+# The Admin tab
+#
+# Administration is its own section rather than a third block on Settings, and
+# the server decides whether it exists. These assert the *shell*, which is the
+# only thing the split changed — @admin_required is what actually closes the
+# routes, and the tests above cover that.
+# ---------------------------------------------------------------------------
+
+def _shell(client):
+    res = client.get('/')
+    assert res.status_code == 200
+    return res.get_data(as_text=True)
+
+
+ADMIN_MARKERS = ('data-nav="admin"', 'id="admin-page"',
+                 'id="users-list"', 'id="nu-username"')
+
+
+def test_the_admin_tab_is_rendered_for_an_administrator(client, admin):
+    html = _shell(client)
+    for marker in ADMIN_MARKERS:
+        assert marker in html, marker
+
+
+def test_the_admin_tab_is_absent_for_a_plain_user(client, users_file):
+    """Absent from the document, not hidden inside it.
+
+    A display:none panel that everyone receives still names what exists and
+    hands over the form that drives it. The routes refuse either way; this is
+    about not shipping the door to someone who cannot open it.
+    """
+    terminal.create_user('admin', GOOD_PW, 'admin')
+    terminal.create_user('plain', OTHER_PW, 'user')
+    _login(client, 'plain', OTHER_PW)
+
+    html = _shell(client)
+    assert 'data-nav="news"' in html            # the nav itself rendered
+    for marker in ADMIN_MARKERS:
+        assert marker not in html, marker
+
+
+def test_splitting_administration_out_left_settings_whole(client, users_file):
+    """A plain user lost nothing to the move — Settings was never the admin bit."""
+    terminal.create_user('admin', GOOD_PW, 'admin')
+    terminal.create_user('plain', OTHER_PW, 'user')
+    _login(client, 'plain', OTHER_PW)
+
+    html = _shell(client)
+    for marker in ('id="settings-page"', 'id="acct-who"', 'id="pw-current"',
+                   'id="set-anthropic"', 'id="set-deepseek"'):
+        assert marker in html, marker
+
+
+# ---------------------------------------------------------------------------
 # Password change
 # ---------------------------------------------------------------------------
 

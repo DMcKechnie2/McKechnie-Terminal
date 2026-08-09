@@ -14,9 +14,9 @@ app_secret.json
 # Password hashes and account records — never commit
 users.json
 
-# Generated report PDFs: large, rebuildable, and they embed the theses of
-# whoever built them. The portfolio JSON under users/<name>/ stays tracked,
-# matching how it was tracked at the repo root before accounts existed.
+# Generated report PDFs: large and rebuildable, and one per account per ticker.
+# The portfolio JSON under users/<name>/ stays tracked, matching how it was
+# tracked at the repo root before accounts existed.
 users/*/reports/
 
 # Local scratch output from the value screener

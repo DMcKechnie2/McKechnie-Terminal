@@ -128,6 +128,34 @@ def test_a_zero_share_count_is_dropped_rather_than_charted(mt_rows):
     assert set(terminal.scrape_macrotrends('X', 'shares')) == {'2020-12-31'}
 
 
+def test_the_request_asks_for_more_than_the_default_window(monkeypatch):
+    """`yb` is what gets us more than fourteen years, and losing it is silent.
+
+    Fourteen is the endpoint's default, not its limit. Drop this parameter and
+    every chart quietly shortens to that default — no error, no empty series, no
+    log line, and the merge still passes its gate because the years it validates
+    against are the recent ones that come back either way. It reads as working
+    code. The only thing that ever says otherwise is a bar that isn't there.
+    """
+    seen = {}
+
+    class _Resp:
+        text = 'var chartData = [];'
+        def raise_for_status(self): pass
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        seen.update(params or {})
+        return _Resp()
+
+    import requests
+    monkeypatch.setattr(requests, 'get', fake_get)
+    terminal._mt_chart_rows('AAPL', 'free-cash-flow', 'cash-flow-statement')
+    assert int(seen['yb']) == terminal._MT_YEARS_BACK
+    # Wide enough to be worth the parameter at all: the default already reaches
+    # fourteen, so anything near it buys nothing.
+    assert terminal._MT_YEARS_BACK >= 25
+
+
 def test_transport_failure_raises_rather_than_reading_empty(monkeypatch):
     """`_mt_cached` stores whatever this returns for six hours.
 

@@ -267,6 +267,48 @@ def test_short_percent_of_float_is_recomputed_when_yahoo_omits_it():
     assert out['change_pct'] == 5.29            # short interest rose
 
 
+def test_short_percent_of_float_is_dropped_when_the_bases_disagree():
+    """TSM's floatShares counts ordinary shares (37.8B) while sharesShort and
+    sharesOutstanding count ADRs (5.2B) — five ordinary to the receipt. Dividing
+    across that gives 0.09% where 0.64% of the receipts are short, so the figure
+    is suppressed. The deposit ratio is not in the payload, so it cannot be
+    converted."""
+    out = terminal._build_short_interest(
+        {'sharesShort': 33_350_090, 'floatShares': 37_834_580_544,
+         'sharesOutstanding': 5_186_474_013})
+    assert out['pct_of_float'] is None
+    assert out['pct_of_outstanding'] == 0.64      # both terms count receipts
+
+
+def test_short_percent_of_float_survives_a_float_a_hair_over_the_count():
+    """The two figures can be dated days apart, which lifts the float just past
+    the count without changing its basis. A real mismatch is a whole deposit
+    ratio clear of that."""
+    out = terminal._build_short_interest(
+        {'sharesShort': 10_000_000, 'floatShares': 1_001_000_000,
+         'sharesOutstanding': 1_000_000_000})
+    assert out['pct_of_float'] == 1.0
+
+
+def test_yahoos_own_short_percent_of_float_is_kept_on_an_adr():
+    """Yahoo quotes it on the receipt basis already, so the guard must not reach
+    it: TSM reports 0.69%, which sits beside 0.64% of shares outstanding rather
+    than the 0.09% an ordinary-share float would give."""
+    out = terminal._build_short_interest(
+        {'sharesShort': 33_350_090, 'floatShares': 37_834_580_544,
+         'sharesOutstanding': 5_186_474_013, 'shortPercentOfFloat': 0.0069})
+    assert out['pct_of_float'] == 0.69
+
+
+def test_short_percent_of_float_is_recomputed_without_a_share_count_to_check():
+    """No sharesOutstanding means no way to spot a mixed basis. The division is
+    still the best available answer, so it stands."""
+    out = terminal._build_short_interest(
+        {'sharesShort': 7_852_304, 'floatShares': 1_388_470_896})
+    assert out['pct_of_float'] == 0.57
+    assert out['pct_of_outstanding'] is None
+
+
 def test_short_interest_date_is_read_as_utc():
     """Yahoo dates this at UTC midnight; reading it in local time rolls it back
     a day for anyone west of Greenwich."""
@@ -299,3 +341,108 @@ def test_short_interest_is_empty_without_a_share_count():
 def test_fmt_count_carries_no_dollar_sign(value, expected):
     """Share counts are not money — format_large_number would prefix a $."""
     assert terminal._fmt_count(value) == expected
+
+
+# ---------------------------------------------------------------------------
+# Reporting currency
+#
+# SK hynix files in won. Its ~₩189T of TTM revenue rendered as "$189.17T" — a
+# number no company on earth has ever billed, and one nothing on the page gave
+# a reader any way to catch. The figures were right; only the symbol lied.
+#
+# The harder half is the ADR case, where the listing and the filing are in
+# *different* currencies at once and a single symbol cannot be right for both.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('code,expected', [
+    ('USD', '$'),
+    ('KRW', '₩'),
+    ('JPY', '¥'),
+    ('CNY', 'CN¥'),      # not '¥' — it would collide with JPY
+    ('TWD', 'NT$'),
+    ('CAD', 'C$'),
+    ('GBp', 'p'),        # pence-quoted London listing, 1/100th of GBP
+    ('GBP', '£'),
+    ('SEK', 'SEK '),     # unmapped-but-real: the ISO code, never a bare '$'
+    ('ZZZ', 'ZZZ '),
+    (None,  '$'),
+    ('',    '$'),
+])
+def test_currency_symbol(code, expected):
+    assert terminal._currency_symbol(code) == expected
+
+
+def test_a_won_figure_is_not_labelled_in_dollars():
+    """The reported defect, at the unit that produced it."""
+    won = terminal.format_large_number(189_170_676_924_416, '₩')
+    assert won == '₩189.17T'
+    assert '$' not in won
+
+
+def test_format_large_number_still_defaults_to_dollars():
+    """Portfolio code passes no symbol and must be untouched by this."""
+    assert terminal.format_large_number(5.6e9) == '$5.60B'
+    assert terminal.format_large_number(-4.5e9) == '-$4.50B'
+
+
+def test_a_negative_keeps_the_sign_outside_a_multi_char_symbol():
+    assert terminal.format_large_number(-2.4e12, 'NT$') == '-NT$2.40T'
+
+
+def test_balance_sheet_figures_carry_the_filing_currency():
+    bs = _frame({
+        'Total Assets':      [9.38e12],
+        'Stockholders Equity': [6.43e12],
+    }, ['2025-12-31'])
+
+    out = terminal._build_balance_sheet(bs, None, None, symbol='NT$')
+    assert out['assets_str'] == 'NT$9.38T'
+    assert out['equity_str'] == 'NT$6.43T'
+    # Absent rows are the normal case and must still be labelled, not '$N/A'.
+    assert out['goodwill_str'] == 'N/A'
+
+
+def test_price_to_tangible_book_is_suppressed_across_currencies():
+    """TSM quotes in USD and files in TWD, so price / book-per-share divides
+    dollars by New Taiwan dollars and lands ~31x off — as a bare ratio, with no
+    unit on it to give the error away."""
+    bs = _frame({
+        'Total Assets':        [9.38e12],
+        'Tangible Book Value': [6.00e12],
+    }, ['2025-12-31'])
+
+    mixed = terminal._build_balance_sheet(
+        bs, None, None, shares_out=5.19e9, price=420.04,
+        symbol='NT$', price_matches_filing=False)
+    assert mixed['tangible_book_per_share'] is not None   # still a real figure
+    assert mixed['price_to_tangible_book'] is None        # the ratio is not
+
+    same = terminal._build_balance_sheet(
+        bs, None, None, shares_out=5.19e9, price=420.04,
+        symbol='NT$', price_matches_filing=True)
+    assert same['price_to_tangible_book'] is not None
+
+
+def test_estimate_frames_use_their_own_currency_column():
+    """Yahoo returns TSM's EPS estimates in USD per ADR and its revenue
+    estimates in TWD, in the same lookup. Each frame says which it is, so the
+    frame wins over anything inferred from the listing."""
+    eps = _est_frame({'0y': {'avg': 16.82, 'currency': 'USD'}})
+    rev = _est_frame({'0y': {'avg': 5.42e12, 'currency': 'TWD'}})
+
+    out = terminal._build_analyst({}, eps, rev,
+                                  price_symbol='$', money_symbol='NT$')
+    assert out['eps_estimates'][0]['avg_str'] == '$16.82'
+    assert out['rev_estimates'][0]['avg_str'] == 'NT$5.42T'
+
+
+def test_estimates_fall_back_to_the_passed_symbol():
+    """A frame with no currency column — the shape the old fixtures use."""
+    eps = _est_frame({'0y': {'avg': 4.03}})
+    rev = _est_frame({'0y': {'avg': 1.808e10}})
+
+    out = terminal._build_analyst({}, eps, rev,
+                                  price_symbol='C$', money_symbol='C$')
+    assert out['eps_estimates'][0]['avg_str'] == 'C$4.03'
+    assert out['rev_estimates'][0]['avg_str'] == 'C$18.08B'
+    assert out['price_symbol'] == 'C$'

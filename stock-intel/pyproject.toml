@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-intel"
+version = "1.0.0"
+description = "Structured equity data for AI agents — raw numerics, declared units, mechanical flags, explicit failure reporting."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "yfinance>=0.2.40",
+    "pandas>=2.0",
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+
+[project.scripts]
+stock-intel = "stock_intel.cli:main"
+stock-intel-mcp = "stock_intel.server:main"
+
+[tool.setuptools.packages.find]
+include = ["stock_intel*"]
