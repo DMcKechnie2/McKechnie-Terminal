@@ -764,6 +764,72 @@ select.settings-input { cursor: pointer; }
   padding-left: 2px;
 }
 
+/* ── Annual / quarterly toggle ──────────────────────────────────────────────
+   A segmented control, sized and spelled like the rest of the page's furniture:
+   the tokens carry the radius, `.section-label`'s tracking carries the caption,
+   and the buttons are sentence case because a control says what it does.
+   `--r-pill` on the group with the halves squared off inside it, so the seam
+   between them reads as a seam — the same rule .search-input/.search-btn and
+   .settings-input-wrap follow. */
+.period-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 40px;
+  flex-wrap: wrap;
+}
+
+.period-row-label {
+  font-size: var(--fs-1);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-left: 2px;
+}
+
+.period-toggle {
+  display: inline-flex;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  padding: 2px;
+}
+
+/* `.freq-btn`, not `.period-btn` — that class already belongs to the price
+   chart's range selector (1D/1W/1M/1Y/5Y/10Y/All), which has its own rule and
+   its own handler. Sharing it collided both ways: their handler clears .active
+   across every match and was wiping this control's state, and a click on any
+   range button reached this one's listener with `dataset.period` undefined,
+   which reads as "annual" and silently snapped the fundamental charts back out
+   of quarterly. The `.movers-ex-btn` lesson, one class over. */
+.freq-btn {
+  font-family: inherit;
+  font-size: var(--fs-1);
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-pill);
+  padding: 5px 14px;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.freq-btn:hover { color: var(--text); }
+
+.freq-btn.active {
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+
+.period-status {
+  font-size: var(--fs-1);
+  color: var(--muted);
+}
+
+.period-status.error { color: var(--down); }
+
 .section-rule {
   height: 1px;
   background: var(--border);
@@ -827,9 +893,31 @@ select.settings-input { cursor: pointer; }
 .g2 { grid-template-columns: repeat(2, 1fr); }
 .g3 { grid-template-columns: repeat(3, 1fr); }
 .g4 { grid-template-columns: repeat(4, 1fr); }
+.g5 { grid-template-columns: repeat(5, 1fr); }
+.g6 { grid-template-columns: repeat(6, 1fr); }
+.g7 { grid-template-columns: repeat(7, 1fr); }
 
+/* The scale runs to 7 because the stock page has rows of 5, 6 and 7 metrics,
+   and those rows used to carry `style="grid-template-columns: repeat(7, 1fr)"`
+   inline — two of them on an element also classed `.g4`, which said four.
+
+   An inline declaration outranks every media query in this file, so those five
+   rows could not respond to anything: at 375px the stock page laid out seven
+   fixed columns and the document scrolled sideways to 999px, dragging the
+   fixed ticker tape out to 999px with it. The rules directly below existed the
+   whole time and were simply unreachable — the responsive CSS was decorative.
+
+   So a column count is a class, never an inline style. Anything that writes
+   grid-template-columns at the element takes the whole page out of the
+   responsive system silently, which is the failure mode that looks exactly
+   like working code on the machine it was written on.
+
+   This rule is deliberately unchanged from before the classes existed: `.g3`
+   and `.g4` collapse here and the wider rows do not, because a 5/6/7-column
+   row was inline and therefore fixed at every width. Above the phone
+   breakpoint the desktop layout is exactly what it always was; the collapse
+   for those three lives in the 640px block and nowhere else. */
 @media (max-width: 680px) { .g3, .g4 { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 420px) { .g2, .g3, .g4 { grid-template-columns: 1fr; } }
 
 /* Box. No entrance animation: thirty tiles fading up on every tab switch read
    as lag, not polish. */
@@ -876,12 +964,46 @@ select.settings-input { cursor: pointer; }
    news row — and every one of them would square the box off again. The clip
    is safe because .table-scroll is still the nearest scrollport, so sticky
    headers keep sticking to it rather than to this element. */
+/* `position: relative` is load-bearing, and it is the whole reason the empty
+   states render where they do. Six of them (.chart-empty on earnings, FCF,
+   balance sheet, shares outstanding, dividend history and P/E) are
+   `position: absolute; inset: 0` overlays that sit on top of a chart canvas so
+   the box keeps its height while the message shows. They need this box to be
+   their containing block.
+
+   It used to be, by accident. This rule carried `animation: fadeUp 0.35s ease
+   both`, whose keyframes end on `transform: translateY(0)` — and with
+   `fill-mode: both` that transform stays applied forever, which makes the
+   element a containing block for absolutely-positioned descendants. The design
+   pass dropped the animation for the radius and the clip, and took the
+   containing block with it: all six overlays reparented to `#wrap` and drew as
+   full-width 200px bands pinned to the *top of the page*.
+
+   That is worse than a cosmetic slip, because `inset: 0` also makes them a
+   transparent hit target over everything underneath. On any ticker with no
+   dividend history — AMZN, TSLA, most growth names — "No dividend history
+   found." landed across the header and `elementFromPoint()` at the centre of
+   the "+ Holdings" hero button returned `#div-empty`, so the button could not
+   be clicked at all. The two symptoms are one bug.
+
+   `overflow: hidden` does not save this: it only clips descendants whose
+   containing block is this box or inside it, which is exactly what these had
+   stopped being. And relative positioning at `z-index: auto` creates no
+   stacking context, so nothing about the layering changes. */
 .table-box {
+  position: relative;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   overflow: hidden;
 }
+
+/* An empty state that *is* the box rather than an overlay on one. #bs-empty
+   replaces the balance-sheet grid instead of covering a canvas, so it carries
+   both classes — and the rule above cannot reach it, because the absolute
+   positioning is on the element itself. It lays out in flow and keeps only the
+   centring and the muted type; `inset` is inert once it is static. */
+.table-box.chart-empty { position: static; }
 
 .table-scroll {
   max-height: 280px;
@@ -1223,14 +1345,10 @@ body.light .eh-box { --eh-beat: #007a33; --eh-miss: #cc0020; --eh-met: #996600; 
   .hero-chart-wrap { width: 100%; min-width: 0; }
 }
 
-@media (max-width: 640px) {
-  .wrap, .appbar-inner { padding-left: 16px; padding-right: 16px; }
-  .hero-left { max-width: 100%; min-width: 0; flex-shrink: 1; }
-  .hero-ticker { font-size: 34px; }
-  .hero-name-row { flex-wrap: wrap; }
-  .chart-top-row { flex-wrap: wrap; }
-  .eh-header { flex-wrap: wrap; }
-}
+/* The hero's phone rules moved into the single 640px block at the bottom of
+   this file, along with everything else that fires at that width. There were
+   two `@media (max-width: 640px)` blocks setting `.wrap` padding to different
+   values, and whichever sat lower in the file silently won. */
 
 .chart-periods {
   display: flex;
@@ -1750,6 +1868,16 @@ body.light .search-input:-webkit-autofill:focus {
 }
 
 .dcf-input:focus { border-color: var(--accent); }
+
+/* Sits under a field to show what the entry implies — the share count behind the
+   market cap. The figure is derived, so it reads as a note and never as data. */
+.dcf-hint {
+  font-size: var(--fs-0);
+  color: var(--muted);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+.dcf-hint:empty { display: none; }
 
 .dcf-input[type="date"] { color-scheme: dark; }
 body.light .dcf-input[type="date"] { color-scheme: light; }
@@ -2336,6 +2464,51 @@ input[type="range"].dcf-slider {
 .report-hero-btn.errored:hover { background: var(--danger); color: #fff; }
 @keyframes reportPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
+/* Same state vocabulary as the Report button, since it is the same kind of
+   control: a thing that takes a while, can fail, and costs the account money. */
+.guidance-hero-btn { border-color: var(--accent2); color: var(--accent2); }
+.guidance-hero-btn:hover { background: var(--accent2); color: #fff; }
+.guidance-hero-btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; background: transparent; }
+.guidance-hero-btn.generating { border-color: var(--accent2); color: var(--accent2); animation: reportPulse 1.4s ease-in-out infinite; }
+.guidance-hero-btn.done { border-color: var(--accent); color: var(--accent); animation: none; }
+.guidance-hero-btn.done:hover { background: var(--accent); color: var(--on-accent); }
+.guidance-hero-btn.errored { border-color: var(--danger); color: var(--danger); animation: none; }
+.guidance-hero-btn.errored:hover { background: var(--danger); color: #fff; }
+
+/* ── Forward guidance panel ── */
+.fg-period { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.fg-period:last-child { border-bottom: none; }
+.fg-period-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.fg-period-title { font-size: var(--fs-4); font-weight: 700; color: var(--text); letter-spacing: 0.02em; }
+/* The calendar span the fiscal label covers. Sits with the title rather than
+   the source line: it says *what is being projected*, not where it came from. */
+.fg-period-span { font-size: var(--fs-2); font-weight: 600; color: var(--accent2);
+                  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fg-period-src { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.fg-stats { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.fg-stat { flex: 1 1 130px; min-width: 130px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel2, transparent); }
+.fg-stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-bottom: 4px; }
+.fg-stat-value { font-size: 17px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.fg-stat-sub { font-size: 11px; color: var(--muted); margin-top: 3px; font-variant-numeric: tabular-nums; }
+.fg-stat-sub.up { color: var(--accent); }
+.fg-stat-sub.down { color: var(--danger); }
+/* A derived figure is a reconstruction, not something the company said, and it
+   has to be legible as one at a glance — it is the number a reader is most
+   likely to quote back as if the filer had given it. */
+.fg-stat.derived { border-style: dashed; }
+.fg-rows { width: 100%; border-collapse: collapse; font-size: 12px; }
+.fg-rows td { padding: 4px 8px 4px 0; vertical-align: top; border: none; }
+.fg-rows td.fg-val { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--text); }
+.fg-rows td.fg-src { color: var(--muted); white-space: nowrap; padding-left: 12px; font-size: 11px; }
+.fg-rows tr.fg-derived td { color: var(--muted); font-style: italic; }
+.fg-note { font-size: 11px; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+.fg-note code { font-family: inherit; color: var(--text); }
+.fg-empty { padding: 22px 20px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.fg-refresh { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 4px;
+              font-size: 11px; padding: 3px 9px; cursor: pointer; margin-left: auto; }
+.fg-refresh:hover { color: var(--text); border-color: var(--accent2); }
+.fg-refresh:disabled { opacity: 0.45; cursor: not-allowed; }
+
 .hero-name-row {
   display: flex;
   align-items: flex-start;
@@ -2562,12 +2735,75 @@ input[type="range"].dcf-slider {
   width: 8px; height: 8px;
   border-radius: 50%;
 }
+/* A section label with its own action on the right — Options / + Option,
+   Transaction History / filter + Quick Entry. Written inline three times, which
+   is why none of them could wrap: the label and a 255px control group want
+   385px and the row simply ran off a 360px phone. */
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.section-head .section-label { margin-bottom: 0; }
+
+/* The two controls that sit on one of those headers — "+ Option",
+   "+ Quick Entry" and the transaction filter. These declarations are the
+   inline styles they used to carry, moved verbatim so the desktop rendering is
+   unchanged; they are classes only so the phone block can reach them, which an
+   inline style does not allow. --fs-0 is 10px and --fs-1 is 11px, the literals
+   that were written here before. */
+/* The insider period chips. `min-width` moves out of their inline style so the
+   phone block can widen it; 68px is the value it has always had. */
+.insider-chip { min-width: 68px; }
+
+/* The valuations row's remove control. Its own class rather than `.hp-remove`,
+   which is the same control on the Holdings table at 16px: this one was written
+   inline at 15px, and the point of moving it to CSS is to reach it from the
+   phone block, not to restyle the desktop by a pixel. */
+.val-remove {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 15px;
+  padding: 0 4px;
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.val-remove:hover { color: var(--danger); }
+
+.mini-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: var(--fs-0);
+  padding: 3px 10px;
+  border-radius: var(--r);
+  cursor: pointer;
+  letter-spacing: 0.05em;
+}
+.mini-input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: var(--fs-1);
+  padding: 3px 8px;
+  border-radius: var(--r);
+  width: 130px;
+  outline: none;
+}
+
 .hp-summary {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 10px;
   margin-bottom: 32px;
 }
+/* Performance carries three cards, not four, and said so with an inline
+   `grid-template-columns` — which no media query can reach, so that row alone
+   held three fixed columns at every width. A count is a class here for the
+   same reason it is on `.grid`. */
+.hp-summary-3 { grid-template-columns: repeat(3, 1fr); }
 .hp-summary-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -2695,9 +2931,8 @@ input[type="range"].dcf-slider {
 @media (max-width: 900px) {
   .perf-grid { grid-template-columns: repeat(2, 1fr); }
 }
-@media (max-width: 620px) {
-  .perf-grid { grid-template-columns: 1fr; }
-}
+/* `.perf-grid`'s single-column rule was a lone `@media (max-width: 620px)` —
+   a ninth breakpoint twenty pixels from the phone one. It is in the 640 block. */
 .hp-table {
   width: 100%;
   border-collapse: collapse;
@@ -2861,6 +3096,128 @@ input[type="range"].dcf-slider {
 }
 @keyframes mspin { to { transform: rotate(360deg); } }
 .movers-empty { padding: 32px; text-align: center; color: var(--muted); font-size: 11px; }
+
+/* The Hide control on a discovery row — movers and the market browser share it,
+   the way they share the table it sits in.
+
+   Revealed on hover rather than drawn always: the market browser runs to 3,402
+   rows, and a permanently visible button on each of them is a second column of
+   furniture down the whole table competing with the ticker it is attached to.
+   Hover is not available everywhere, though, so it is forced visible where
+   there is none — without that the feature simply does not exist on a phone. */
+.row-hide-btn {
+  margin-left: 8px; padding: 0 5px;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: none; color: var(--muted);
+  font-family: var(--font-ui); font-size: var(--fs-1); font-weight: 600;
+  line-height: 17px; cursor: pointer; opacity: 0;
+  transition: opacity 0.1s, color 0.1s, border-color 0.1s;
+}
+.movers-table tr:hover .row-hide-btn { opacity: 1; }
+.row-hide-btn:hover { color: var(--danger); border-color: var(--danger); }
+/* Keyboard reach: the button is otherwise invisible until focused, and a
+   control you can tab to but cannot see is worse than one that is not there. */
+.row-hide-btn:focus-visible {
+  opacity: 1; outline: 2px solid var(--accent2); outline-offset: 1px;
+}
+@media (hover: none) { .row-hide-btn { opacity: 1; } }
+
+/* Hidden page. The rows are not click-through — the stock behind one is exactly
+   what this account asked not to be shown — so the pointer must not promise it. */
+#blk-tbody tr { cursor: default; }
+#blk-tbody tr:hover td { background: transparent; }
+.blk-date { color: var(--muted) !important; font-size: var(--fs-1); }
+.blk-action-cell { text-align: right; width: 1%; }
+.blk-note {
+  margin-top: 14px; max-width: 68ch;
+  color: var(--muted); font-size: var(--fs-1); line-height: 1.7;
+}
+
+/* The interstitial a search for a hidden ticker lands on. A panel rather than a
+   line of status text, because it carries the way back out. */
+.blocked-notice {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: 16px 18px; margin-bottom: 18px;
+}
+.blocked-notice-body { flex: 1 1 260px; }
+.blocked-notice-title {
+  font-family: var(--font-display); font-weight: 700;
+  font-size: var(--fs-3); color: var(--text);
+}
+.blocked-notice-sub {
+  margin-top: 4px; color: var(--muted); font-size: var(--fs-1); line-height: 1.6;
+}
+
+/* Index browser.
+   The table is .movers-table and the selector is .movers-ex-btn — the same
+   segmented header, hover wash and tabular numerals, deliberately reused
+   rather than copied. A fourth near-identical table block is how the radius
+   drift documented in CLAUDE.md started, and the news page already reuses
+   .movers-controls for its own strip. Only what is genuinely new to this page
+   gets a class here: a sortable header, a filter box, and the range cell. */
+/* Two selector strips, not one of nine buttons. An index is a curated list and
+   an exchange is a whole venue — they answer different questions, and a flat
+   row of nine mixes "S&P 500" and "TSX Venture" into one undifferentiated
+   ribbon. The label is a section label at the smallest step on the scale, the
+   same furniture the rest of the page uses rather than a new one. */
+.idx-group       { display: flex; align-items: center; gap: 8px; }
+.idx-group-label {
+  color: var(--muted); font-family: var(--font-ui);
+  font-size: var(--fs-0); font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.idx-controls-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+/* The chunk sentinel. It carries the "showing N of M" line and is the element
+   the observer watches, so it has to have height even when it is the last thing
+   on the page. */
+.idx-more {
+  padding: 14px; text-align: center; cursor: pointer;
+  color: var(--muted); font-family: var(--font-ui); font-size: var(--fs-1);
+  border-top: 1px solid var(--border); transition: color 0.12s;
+}
+.idx-more:hover { color: var(--text); }
+.idx-nomatch {
+  padding: 28px 14px !important; text-align: center; color: var(--muted);
+  font-family: var(--font-ui); font-size: var(--fs-1);
+}
+.idx-filter {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--r); color: var(--text);
+  font-family: var(--font-ui); font-size: var(--fs-1);
+  padding: 5px 11px; width: 180px; transition: border-color 0.12s;
+}
+.idx-filter:focus       { outline: none; border-color: var(--accent); }
+.idx-filter::placeholder { color: var(--muted); }
+
+.movers-table th.idx-sort         { cursor: pointer; user-select: none; }
+.movers-table th.idx-sort:hover   { color: var(--text); }
+.movers-table th.idx-sort.active  { color: var(--text); }
+.idx-arrow                        { margin-left: 4px; opacity: 0; }
+.movers-table th.idx-sort.active .idx-arrow { opacity: 1; }
+
+/* 52-week range: both bounds, and where today's price sits between them.
+   The track is the point of the column — two numbers alone do not say whether
+   a name is pinned to its low or its high, which is the one thing a range is
+   scanned for. A row whose range is degenerate (a listing younger than a year)
+   carries no marker rather than one parked at the left edge. */
+.idx-range-cell  { width: 200px; }
+.idx-range       { display: flex; align-items: center; gap: 8px; }
+.idx-range-num   { font-size: var(--fs-0); color: var(--muted); font-variant-numeric: tabular-nums; }
+.idx-range-track {
+  position: relative; flex: 1; min-width: 56px; height: 4px;
+  background: var(--border); border-radius: var(--r-pill);
+}
+.idx-range-mark {
+  position: absolute; top: 50%; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--accent);
+  border: 1px solid var(--surface); transform: translate(-50%, -50%);
+}
+.idx-pe-cell {
+  font-family: var(--font-ui); font-size: var(--fs-2);
+  text-align: right; color: var(--text) !important;
+}
 .movers-meta  { font-size: var(--fs-1); color: var(--muted); margin-left: 4px; }
 
 /* light mode */
@@ -2872,6 +3229,244 @@ input[type="range"].dcf-slider {
    repaints every chip #ebebeb, which would strip the active chip's accent and
    leave white text on light grey. */
 body.light .bn-badge          { background: rgba(220,38,38,0.10); }
+
+/* ── Phone ───────────────────────────────────────────────────────────────────
+   Phone rules live here and nowhere else, for the same reason there is one
+   `_hideAllPages()`: the file had drifted to eight breakpoints at 1150, 1100,
+   900, 780, 680, 640, 620 and 420 with no rule about which meant what, so a new
+   panel had nothing to copy and the answer differed by neighbour. The widths
+   above this block stay — they do desktop-to-narrow-desktop work — but 640px
+   means "phone" and this is the only place it appears.
+
+   640 rather than 480: it covers every phone in portrait (360 Android through
+   430 Pro Max) with room above the largest, and it is a width already in the
+   file rather than a ninth new number.
+
+   What this block is NOT is a second UI. Everything below re-lays out markup
+   that is already there; nothing is hidden that carries information the wide
+   layout carries and no phone-only element exists, so the two cannot drift the
+   way a separate mobile template would. The three places a column is dropped
+   are tables, and each one is scoped to a single container id — `.movers-table`
+   and `.hp-table` are each worn by four different tables with four different
+   column orders, and an unscoped nth-child would hide Volume on one and Expiry
+   on another. That is the `.movers-ex-btn` lesson, one selector over.
+   ─────────────────────────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+
+  /* ── Page chrome ──
+     Before: a 32px tape over a 137px app bar — 169px, 21% of an iPhone's
+     812px, permanently sticky. The bar was three rows because the wordmark is
+     180px wide, which pushed `.search-row` (already capped at 40vw) onto its
+     own line and left the input itself **72px**: the primary control of the
+     whole app, two thirds the width of the Search button beside it.
+
+     The wordmark is what goes, not the search. `#logoMark` carries identity in
+     the corner and is still the theme toggle; `#homeLink` keeps its id and its
+     handler and is only display:none, since the JS binds ids and Movers in the
+     nav strip is the same destination. Two rows, ~88px, and the input gets the
+     whole middle of row one. */
+  .appbar-inner  { gap: 10px; padding: 6px 12px; min-height: 0; }
+  .appbar-title  { display: none; }
+  .appbar-brand  { order: 1; }
+  /* Basis 0, not auto. Flex decides which items share a line from their basis
+     *before* it applies grow, so an auto basis measures the search row at its
+     content width — a 16px placeholder plus the Search button, ~300px — which
+     does not fit beside the mark and the gear, and the gear wrapped onto a
+     third row of its own. From zero it always fits, then grows into whatever
+     the other two leave. */
+  .search-row    { order: 2; width: auto; flex: 1 1 0; min-width: 0; margin-left: 0; }
+  .icon-btn      { order: 3; }
+  .mainnav       { order: 4; width: 100%; margin-top: 0; }
+  .navlink       { padding: 10px 11px; }
+
+  /* The strip scrolls but hides its scrollbar, so on a touch screen nothing
+     says there is more to the right. A fade off the trailing edge is the
+     affordance; it costs no layout and no element. */
+  .mainnav {
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+            mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+  }
+
+  .wrap { padding: 14px 12px 64px; }
+
+  /* ── Text and inputs ──
+     iOS zooms the viewport when a focused input's text is under 16px, and does
+     not zoom back out — so every tap on the ticker field left the page scaled
+     and horizontally scrolled. The floor applies to what you type into, not to
+     the page: the display scale below is unchanged. */
+  input, select, textarea { font-size: 16px; }
+  body { -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: rgba(0,179,65,0.15); }
+
+  /* ── Touch targets ──
+     Measured at 375px: 274 controls under 32px tall on Holdings, 162 on
+     Markets, and `.watchlist-remove` at 13x14. These set a 40px floor by
+     padding rather than height, so a control grows around its label instead of
+     letting the label sit off-centre in a taller box. */
+  .movers-ex-btn, .movers-dir-btn, .sublink,
+  .movers-refresh-btn, .movers-expand-btn,
+  .hp-period-btn, .settings-btn, .idx-filter, .search-btn {
+    min-height: 40px;
+    padding-top: 0; padding-bottom: 0;
+  }
+  .period-btn, .exchange-btn, .freq-btn, .wl-hero-btn,
+  .dcf-mode-btn, .bn-pos-btn, .idx-more, .val-price-input,
+  .mini-btn, .mini-input {
+    min-height: 40px;
+  }
+  /* These two read at 10px and 11px on the desktop header they were written
+     for, which is a hint size, not a tap size. */
+  .mini-btn        { font-size: var(--fs-2); padding-left: 14px; padding-right: 14px; }
+  .mini-input      { font-size: 16px; }
+  /* box-sizing is border-box, so the inline `min-width: 68px` leaves a 46px
+     content box — six short of what "-0.005%" needs at 13px/600, and the chip
+     clipped its own percent sign once the row wrapped. Phone only: at desktop
+     width the chips never wrap, so flex:1 governs and 68 never binds. */
+  .insider-chip    { min-width: 84px; }
+  .row-hide-btn    { min-height: 32px; min-width: 44px; opacity: 1; }
+  .watchlist-remove{ min-height: 40px; min-width: 40px; font-size: var(--fs-4); }
+  .hp-remove,
+  .val-remove      { min-height: 40px; min-width: 40px; font-size: var(--fs-4); }
+  .hp-period-btn   { padding-left: 12px; padding-right: 12px; }
+  .search-input    { height: 40px; }
+  #acct-refresh-btn, #txn-search { min-height: 36px; }
+  /* A 16px-tall range input gives the thumb a 16px strip to be caught in.
+     The track keeps its own height; this is the hit area around it. */
+  .dcf-slider      { height: 32px; }
+
+  /* ── Metric grids ──
+     Two across. One would be honest too, but the stock page carries ~30 of
+     these tiles and a single column turns Overview into six screens of
+     scrolling; at 2-up a tile is ~166px, which fits "$3.45T" at the reduced
+     value size below. */
+  .g2, .g3, .g4, .g5, .g6, .g7 { grid-template-columns: repeat(2, 1fr); }
+  .box        { padding: 12px 12px 14px; }
+  .box-label  { margin-bottom: 6px; letter-spacing: 0.06em; }
+  .box-value  { font-size: 19px; }
+
+  /* ── Summary cards ──
+     `.hp-summary` was `repeat(4, 1fr)` with no media query at any width, so
+     Holdings, Performance and Dividends each pushed a four-card row to its
+     content width and scrolled the document sideways — 641px on Holdings. */
+  /* The modifier is named again rather than relying on `.hp-summary` alone:
+     `.hp-summary-3` is two classes deep and would otherwise outrank this. */
+  .hp-summary,
+  .hp-summary.hp-summary-3 { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .hp-summary-card { padding: 12px 13px 13px; }
+  .hp-summary-value{ font-size: var(--fs-4); }
+  /* A per-ticker P/L box carries a header, two figures and a percentage, which
+     is more than fits beside another one. This came from a `620px` block. */
+  .perf-grid       { grid-template-columns: 1fr; gap: 8px; }
+
+  /* ── Stock hero ──
+     From the other `640px` block that used to sit beside `.hero-chart-wrap`. */
+  .hero-left     { max-width: 100%; min-width: 0; flex-shrink: 1; }
+  .hero-ticker   { font-size: 34px; }
+  .hero-name-row { flex-wrap: wrap; }
+  .chart-top-row { flex-wrap: wrap; }
+  .eh-header     { flex-wrap: wrap; }
+
+  /* ── Charts ──
+     The portfolio row is a flex pair with a fixed 220px pie, which at 375px
+     left the main chart 109px wide. They stack, and the pie stops being fixed
+     width. */
+  .hp-charts-row                     { flex-direction: column; gap: 10px; }
+  .hp-charts-row .hp-chart-box-pie   { flex: 1 1 auto; width: 100%; }
+  .hp-chart-box                      { padding: 14px 12px 12px; margin-bottom: 18px; }
+  .hp-chart-header                   { flex-wrap: wrap; gap: 6px; }
+  .hero-chart-wrap                   { padding: 10px 10px 8px; }
+
+  /* ── Control strips ──
+     Markets carries nine exchange buttons across two labelled groups; the
+     strip is 626px of content and `.movers-controls` does not scroll, so the
+     last exchanges were unreachable rather than merely cramped. Each group
+     scrolls on its own, and `margin-left: auto` on the direction tabs — which
+     pushes Winners/Losers to the far right of a wide bar — is what would
+     otherwise strand them on a line of their own. */
+  .movers-controls        { gap: 8px; }
+  .movers-direction-tabs  { margin-left: 0; }
+  .movers-exchange-tabs,
+  .movers-direction-tabs  { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .movers-exchange-tabs::-webkit-scrollbar,
+  .movers-direction-tabs::-webkit-scrollbar { display: none; }
+  .movers-ex-btn, .movers-dir-btn { white-space: nowrap; flex: 0 0 auto; }
+  .idx-group              { flex: 1 1 100%; min-width: 0; }
+  .idx-controls-right     { margin-left: 0; flex: 1 1 100%; }
+  .idx-filter             { flex: 1 1 auto; min-width: 0; }
+
+  /* ── Tables ──
+     Every wide table gets somewhere to scroll first. `#hp-table-wrap` had none
+     at all, so ten columns simply ran off the page and took the document with
+     them (843px at a 375px viewport) — the same way the users list lost its
+     Delete button, and the reason `.table-scroll.wide` exists.
+
+     Then the columns that a phone cannot afford come out. Scoped by container
+     id, never by the shared class: `.hp-table` is also the options, closed
+     options and transactions tables, `.movers-table` is also the Markets and
+     Hidden tables, and the nth-child positions mean something different in
+     each. Nothing dropped here is unavailable — every one of these rows opens
+     the stock page on tap. */
+  #hp-table-wrap, .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* Holdings: Ticker, Shares, Current, Value, Total Return, actions.
+     Out: Name (the ticker is above it), Avg Cost, Acquired, Price Chg (Total
+     Return is the same question answered with dividends counted). */
+  #hp-table-wrap .hp-table th:nth-child(2),  #hp-table-wrap .hp-table td:nth-child(2),
+  #hp-table-wrap .hp-table th:nth-child(4),  #hp-table-wrap .hp-table td:nth-child(4),
+  #hp-table-wrap .hp-table th:nth-child(5),  #hp-table-wrap .hp-table td:nth-child(5),
+  #hp-table-wrap .hp-table th:nth-child(8),  #hp-table-wrap .hp-table td:nth-child(8) { display: none; }
+
+  /* Movers: Ticker, Price, Change, Mkt Cap, hide. Out: Name, Volume. */
+  #movers-table-scroll .movers-table th:nth-child(2), #movers-table-scroll .movers-table td:nth-child(2),
+  #movers-table-scroll .movers-table th:nth-child(5), #movers-table-scroll .movers-table td:nth-child(5) { display: none; }
+
+  /* Markets: Ticker, Price, Change, Mkt Cap. Out: Name, the 52-week range bar
+     (a 200px cell that cannot compress), P/E. */
+  #idx-table-scroll .movers-table th:nth-child(2), #idx-table-scroll .movers-table td:nth-child(2),
+  #idx-table-scroll .movers-table th:nth-child(5), #idx-table-scroll .movers-table td:nth-child(5),
+  #idx-table-scroll .movers-table th:nth-child(6), #idx-table-scroll .movers-table td:nth-child(6) { display: none; }
+
+  .movers-table th, .movers-table td,
+  .hp-table th,     .hp-table td { padding-left: 8px; padding-right: 8px; }
+  .movers-name-cell { max-width: 120px; }
+
+  /* ── Overlays ──
+     The DCF panel is 380px wide on a 375px viewport, so it could never sit
+     fully on screen. Both panels take the width they are given, less a strip
+     that keeps the page behind them visible and tappable to dismiss. */
+  .dcf-sidebar       { width: 100%; right: -100%; padding: 18px 14px; }
+  .watchlist-sidebar { width: 88%; left: -100%; }
+  .holdings-modal    { width: min(340px, calc(100vw - 24px)); padding: 20px 16px; }
+  .holdings-modal-overlay { padding: 12px; align-items: flex-start; padding-top: 12vh; }
+
+  /* ── News ──
+     A headline is `white-space: nowrap` with an ellipsis, which is a sensible
+     way to hold a single line in a wide panel and useless in a 308px one: the
+     measured titles wanted 441–992px, so every item on the feed was cut to
+     about four words. Two wrapped lines instead — still a fixed row height, so
+     the list stays scannable, but the headline is readable. */
+  .news-title {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  /* ── Sections ──
+     A section rule and its label are furniture; on a phone they were taking
+     the same vertical budget as the data under them. */
+  .section-label { margin-top: 22px; }
+  .subnav        { width: 100%; }
+  .sublink       { flex: 1 1 0; }
+
+  /* The label takes the first line and the controls the second, rather than
+     the row running off the side. `#txn-search` gives up its inline 130px so
+     the filter and the button share the width they are left. */
+  .section-head  { flex-wrap: wrap; gap: 8px; }
+  .section-head > div:last-child { flex: 1 1 100%; }
+  #txn-search    { flex: 1 1 auto; min-width: 0; width: auto; }
+  #acct-refresh-btn { flex: 0 0 auto; }
+}
 </style>
 </head>
 <body>
@@ -2909,7 +3504,13 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
       <button class="navlink" data-nav="holdings"    onclick="goAccount('holdings')">Holdings</button>
       <button class="navlink" data-nav="performance" onclick="goAccount('performance')">Performance</button>
       <button class="navlink" data-nav="valuations"  onclick="goAccount('valuations')">Valuations</button>
+      <button class="navlink" data-nav="indexes"     onclick="goIndexes()">Indexes</button>
       <button class="navlink" data-nav="news"        onclick="goNews()">News</button>
+      <!-- Always present, even with nothing hidden. A button that appears only
+           once you have hidden something is one you cannot read before you need
+           it — and the first thing anyone wants after hiding a stock by mistake
+           is a visible way back. -->
+      <button class="navlink" data-nav="hidden"      onclick="goHidden()">Hidden</button>
 {%- if is_admin %}
       <!-- Rendered by the server, not hidden by the client. `display:none` on
            a button whose markup everyone receives is a hint about what
@@ -2940,6 +3541,21 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
 <div class="wrap">
 
   <div id="status" class="status"></div>
+
+  <!-- Searching a hidden ticker lands here rather than on a dashboard. The
+       server refuses /api/stock for one (403), which is what makes a block hold
+       against a symbol typed in full — but a refusal with nothing on screen is
+       the empty-panel failure the fetch wrapper already exists to prevent, so
+       it says which stock, and offers the one action that follows. -->
+  <div id="blocked-notice" class="blocked-notice" style="display:none;">
+    <div class="blocked-notice-body">
+      <div class="blocked-notice-title" id="blocked-notice-title">This stock is hidden.</div>
+      <div class="blocked-notice-sub">You hid it, so the terminal is keeping it out of movers,
+        search, the market browser and the news feeds.</div>
+    </div>
+    <button class="settings-btn primary" id="blocked-notice-unhide">Unhide</button>
+    <button class="settings-btn" onclick="goHidden()">See all hidden</button>
+  </div>
 
 
   <!-- ── Daily Movers (home page) ── -->
@@ -3094,9 +3710,9 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
 
     <!-- Options Holdings -->
     <div style="margin-top:40px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+      <div class="section-head">
         <div class="section-label" style="margin-bottom:0;">Options</div>
-        <button onclick="openBuyOptionModal()" style="background:none;border:1px solid var(--border);color:var(--muted);font-size:10px;padding:3px 10px;border-radius:var(--r);cursor:pointer;letter-spacing:0.05em;">+ Option</button>
+        <button class="mini-btn" onclick="openBuyOptionModal()">+ Option</button>
       </div>
       <div class="section-rule"></div>
       <div id="hp-opt-empty" class="empty-state" style="display:none;">No open options.</div>
@@ -3122,7 +3738,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
 
     <!-- Options History -->
     <div style="margin-top:32px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+      <div class="section-head">
         <div class="section-label" style="margin-bottom:0;">Options History</div>
       </div>
       <div class="section-rule"></div>
@@ -3152,11 +3768,11 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
 
     <!-- Transaction History -->
     <div style="margin-top:40px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+      <div class="section-head">
         <div class="section-label" style="margin-bottom:0;">Transaction History</div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input id="txn-search" type="text" placeholder="Filter by ticker…" oninput="filterTransactions()" style="background:var(--surface);border:1px solid var(--border);color:var(--text);font-size:11px;padding:3px 8px;border-radius:var(--r);width:130px;outline:none;">
-          <button onclick="openQuickTradeModal()" style="background:none;border:1px solid var(--border);color:var(--muted);font-size:10px;padding:3px 10px;border-radius:var(--r);cursor:pointer;letter-spacing:0.05em;">+ Quick Entry</button>
+          <input id="txn-search" class="mini-input" type="text" placeholder="Filter by ticker…" oninput="filterTransactions()">
+          <button class="mini-btn" onclick="openQuickTradeModal()">+ Quick Entry</button>
         </div>
       </div>
       <div class="section-rule"></div>
@@ -3185,7 +3801,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
 
   <!-- ── Performance Panel ── -->
   <div id="performance-page" style="display:none;">
-    <div class="hp-summary" id="perf-summary" style="display:none; grid-template-columns:repeat(3,1fr);">
+    <div class="hp-summary hp-summary-3" id="perf-summary" style="display:none;">
       <div class="hp-summary-card">
         <div class="hp-summary-label">All-Time Gain/Loss</div>
         <div class="hp-summary-value" id="perf-total-pl">—</div>
@@ -3361,7 +3977,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
           <span class="settings-key-name">ANTHROPIC_API_KEY</span>
           <span class="settings-pill" data-key="ANTHROPIC_API_KEY">Not set</span>
         </div>
-        <div class="settings-key-note">Generates StockBox research reports. Without it, the Report button has nothing to call.</div>
+        <div class="settings-key-note">Generates StockBox research reports and extracts forward guidance. Without it, the Report and Guidance buttons have nothing to call.</div>
         <div class="settings-key-foot">
           <div class="settings-mask" data-key="ANTHROPIC_API_KEY" hidden></div>
           <div class="settings-input-wrap">
@@ -3425,6 +4041,27 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
           </div>
           <button class="settings-key-remove" data-key="FRED_API_KEY" hidden
                   onclick="removeKey('FRED_API_KEY')">Remove key</button>
+        </div>
+      </div>
+
+      <div class="settings-key">
+        <div class="settings-key-head">
+          <span class="settings-key-name">ALPHAVANTAGE_API_KEY</span>
+          <span class="settings-pill" data-key="ALPHAVANTAGE_API_KEY">Not set</span>
+        </div>
+        <!-- Not marked required, because guidance still works without it — but
+             it is the difference between covering Apple and Microsoft and not,
+             since those two put their numbers only in the spoken call. -->
+        <div class="settings-key-note">Fetches earnings call transcripts for the Guidance button. Without it, companies that guide only on the call (Apple, Microsoft) report no guidance found. Free tier: alphavantage.co</div>
+        <div class="settings-key-foot">
+          <div class="settings-mask" data-key="ALPHAVANTAGE_API_KEY" hidden></div>
+          <div class="settings-input-wrap">
+            <input id="set-alphavantage" class="settings-input" type="password"
+                   placeholder="16-character key…" autocomplete="off" spellcheck="false" />
+            <button class="settings-btn" onclick="toggleReveal('set-alphavantage', this)">Show</button>
+          </div>
+          <button class="settings-key-remove" data-key="ALPHAVANTAGE_API_KEY" hidden
+                  onclick="removeKey('ALPHAVANTAGE_API_KEY')">Remove key</button>
         </div>
       </div>
     </div>
@@ -3543,6 +4180,111 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
     </div>
   </div><!-- end news-page -->
 
+  <!-- ── Index Browser ──
+       Every constituent arrives in one payload, so the filter box and the
+       sortable headers work in memory and cost no requests — the same call the
+       news category chips make. -->
+  <div id="index-page" style="display:none;">
+    <div class="section-label">Markets<span class="label-note" id="idx-meta"></span></div>
+    <div class="section-rule"></div>
+    <div class="movers-controls">
+      <div class="idx-group">
+        <span class="idx-group-label">Index</span>
+        <div class="movers-exchange-tabs">
+          <button class="movers-ex-btn active" data-idx="sp500">S&amp;P 500</button>
+          <button class="movers-ex-btn"        data-idx="ndx">Nasdaq-100</button>
+          <button class="movers-ex-btn"        data-idx="dow">Dow 30</button>
+          <button class="movers-ex-btn"        data-idx="tsx60">S&amp;P/TSX 60</button>
+        </div>
+      </div>
+      <div class="idx-group">
+        <span class="idx-group-label">Exchange</span>
+        <div class="movers-exchange-tabs">
+          <button class="movers-ex-btn" data-idx="nasdaq">Nasdaq</button>
+          <button class="movers-ex-btn" data-idx="nyse">NYSE</button>
+          <button class="movers-ex-btn" data-idx="amex">NYSE American</button>
+          <button class="movers-ex-btn" data-idx="tsx">TSX</button>
+          <button class="movers-ex-btn" data-idx="tsxv">TSX Venture</button>
+        </div>
+      </div>
+      <div class="idx-controls-right">
+        <input id="idx-filter" class="idx-filter" type="text"
+               placeholder="Filter ticker or name&hellip;" autocomplete="off" />
+        <button class="movers-refresh-btn" id="idx-refresh-btn">&#8635; Refresh</button>
+      </div>
+    </div>
+    <div class="movers-table-box">
+      <div id="idx-loading" class="movers-loading">
+        <!-- The label is its own element because the spinner is a sibling: a
+             cold exchange is 3,400 quotes and a few seconds, so it says which
+             one it is waiting on rather than "index". -->
+        <div class="movers-spinner"></div>&nbsp;<span id="idx-loading-label">Loading&hellip;</span>
+      </div>
+      <div id="idx-empty" class="movers-empty" style="display:none;"></div>
+      <div id="idx-table-scroll" class="movers-table-scroll" style="display:none;">
+        <table class="movers-table">
+          <thead><tr>
+            <th class="idx-sort" data-sort="ticker">Ticker<span class="idx-arrow"></span></th>
+            <th class="idx-sort" data-sort="name">Name<span class="idx-arrow"></span></th>
+            <th class="idx-sort" data-sort="price"  style="text-align:right;">Price<span class="idx-arrow"></span></th>
+            <th class="idx-sort" data-sort="change" style="text-align:right;">Change<span class="idx-arrow"></span></th>
+            <th class="idx-sort" data-sort="week52_pos">52-Week Range<span class="idx-arrow"></span></th>
+            <th class="idx-sort" data-sort="pe"     style="text-align:right;">P/E<span class="idx-arrow"></span></th>
+            <th class="idx-sort" data-sort="mkt_cap_raw" style="text-align:right;">Mkt Cap<span class="idx-arrow"></span></th>
+          </tr></thead>
+          <tbody id="idx-tbody"></tbody>
+        </table>
+      </div>
+      <!-- Watched by an IntersectionObserver: reaching it draws the next chunk.
+           An exchange runs to 3,400 rows and the tbody is rebuilt on every sort
+           and every keystroke in the filter, so drawing all of them would put
+           ~24,000 cells through innerHTML each time. -->
+      <div id="idx-more" class="idx-more" style="display:none;"></div>
+    </div>
+  </div><!-- end index-page -->
+
+  <!-- ── Hidden stocks ──
+       The other end of the Hide control that sits on every discovery row. A
+       block is a filter and nothing more — the watchlist entry, the valuation
+       and the position all survive it untouched — so this page is the one that
+       makes it safe to reach for: whatever you hid is listed here by name, with
+       the date, and one click takes it back.
+
+       No prices. Fetching quotes for stocks the user asked not to see would
+       spend exactly the upstream work the block exists to avoid, and a live
+       green number beside a name on the Hidden list is arguing with the page it
+       is printed on. -->
+  <div id="blocked-page" style="display:none;">
+    <div class="section-label">Hidden<span class="label-note" id="blk-meta"></span></div>
+    <div class="section-rule"></div>
+    <div class="movers-table-box">
+      <div id="blk-empty" class="movers-empty" style="display:none;">
+        Nothing is hidden. Use <strong>Hide</strong> on a stock &mdash; from its own
+        page, the movers table or the market browser &mdash; to keep it out of this
+        terminal.
+      </div>
+      <div id="blk-table-scroll" class="movers-table-scroll" style="display:none;">
+        <table class="movers-table">
+          <thead><tr>
+            <th>Ticker</th><th>Name</th><th>Hidden</th><th></th>
+          </tr></thead>
+          <tbody id="blk-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <!-- Says what a block does and, more usefully, what it does not. "Hidden"
+         invites the reading that the stock has been excluded from the
+         portfolio, and that reading is wrong in a way that would quietly
+         misinform someone about their own returns. -->
+    <div class="blk-note">
+      Hiding a stock keeps it out of the movers table, the market browser, the
+      ticker tape, search, the news feeds, the watchlist and its own page.
+      It does not sell anything and it deletes nothing: a stock you hold still
+      counts in full on Holdings and Performance, and unhiding restores its
+      watchlist entry and valuation exactly as they were.
+    </div>
+  </div><!-- end blocked-page -->
+
   <div id="dashboard">
 
     <div class="hero">
@@ -3559,6 +4301,17 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
             <button class="wl-hero-btn" id="holdings-hero-btn" onclick="openAddHoldingModal()">+ Holdings</button>
             <button class="wl-hero-btn" id="valuation-hero-btn" onclick="openValuationModal()">+ Valuation</button>
             <button class="wl-hero-btn report-hero-btn" id="report-hero-btn" onclick="generateReport()">+ Report</button>
+            <!-- Nothing about guidance happens until this is pressed — not on
+                 page load, and not when the panel is drawn. Reading a stored
+                 result is free and a fresh extraction is not, so the first
+                 press does the free half, and the button only offers to spend
+                 anything once there is something on screen to replace. -->
+            <button class="wl-hero-btn guidance-hero-btn" id="guidance-hero-btn" onclick="showGuidance()">+ Guidance</button>
+            <!-- The one Hide control you can reach without first finding the
+                 stock in a table. Last in the group: it is the destructive-ish
+                 one, and it is the only one that changes what the rest of the
+                 terminal will show you. -->
+            <button class="wl-hero-btn" id="block-hero-btn" onclick="blockCurrentTicker()">Hide</button>
           </div>
         </div>
       </div>
@@ -3591,7 +4344,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
 
     <div class="section-label">Overview</div>
     <div class="section-rule"></div>
-    <div class="grid g4" style="grid-template-columns: repeat(7, 1fr);">
+    <div class="grid g7">
       <div class="box" style="animation-delay:0.05s">
         <div class="box-label">Market Cap</div>
         <div class="box-value green" id="b-mcap"></div>
@@ -3600,7 +4353,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
         <div class="box-label">Total Debt</div>
         <div class="box-value" id="b-debt"></div>
       </div>
-      <div class="box pm-hover-box" id="revenue-hover-box" style="animation-delay:0.10s">
+      <div class="box" style="animation-delay:0.10s">
         <div class="box-label">Revenue (TTM)</div>
         <div class="box-value" id="b-revenue"></div>
       </div>
@@ -3622,19 +4375,10 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
       </div>
     </div>
 
-    <!-- Revenue expand row -->
-    <div class="pm-expand" id="revenue-expand">
-      <div class="pm-popup-title">Revenue — By Year</div>
-      <div class="chart-scroll-outer" id="revenue-scroll-outer" style="height:200px;">
-        <div class="chart-scroll-inner" id="revenue-scroll-inner">
-          <canvas id="revenueChart"></canvas>
-        </div>
-      </div>
-    </div>
-
     <!-- Capex expand row -->
     <div class="pm-expand" id="capex-expand">
-      <div class="pm-popup-title">Capital Expenditure — By Year</div>
+      <div class="pm-popup-title" id="sec-capex">Capital Expenditure — By Year</div>
+      <div class="chart-note" id="capex-period-note" style="display:none;"></div>
       <div class="chart-scroll-outer" id="capex-scroll-outer" style="height:200px;">
         <div class="chart-scroll-inner" id="capex-scroll-inner">
           <canvas id="capexChart"></canvas>
@@ -3644,7 +4388,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
 
     <div class="section-label">Ratios &amp; Yield</div>
     <div class="section-rule"></div>
-    <div class="grid g4" style="grid-template-columns: repeat(7, 1fr);">
+    <div class="grid g7">
       <div class="box" style="animation-delay:0.05s">
         <div class="box-label">Trailing P/E</div>
         <div class="box-value" id="b-pe"></div>
@@ -3677,7 +4421,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
 
     <!-- Profit Margin expand row -->
     <div class="pm-expand" id="pm-expand">
-      <div class="pm-popup-title">Net Profit Margin — By Year</div>
+      <div class="pm-popup-title" id="sec-margin">Net Profit Margin — By Year</div>
       <div class="chart-scroll-outer" id="pm-scroll-outer" style="height:200px;">
         <div class="chart-scroll-inner" id="pm-scroll-inner">
           <canvas id="pmChart"></canvas>
@@ -3687,7 +4431,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
 
     <!-- EPS expand row -->
     <div class="pm-expand" id="eps-expand">
-      <div class="pm-popup-title">Earnings Per Share — By Year</div>
+      <div class="pm-popup-title" id="sec-eps">Earnings Per Share — By Year</div>
       <div class="chart-scroll-outer" id="eps-scroll-outer" style="height:200px;">
         <div class="chart-scroll-inner" id="eps-scroll-inner">
           <canvas id="epsChart"></canvas>
@@ -3696,7 +4440,52 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
       <div class="chart-note" id="eps-note" style="display:none;"></div>
     </div>
 
-    <div class="section-label">Net Earnings — Annual</div>
+    <!-- ── Forward guidance ──
+         What the company said it expects, and what those statements imply for
+         earnings, margins and cash. Sits above the fundamental charts because
+         it is the forward half of the page and they are the backward half; a
+         reader who came to ask "what happens next" should not have to scroll
+         past forty years of history to reach it.
+
+         Hidden until the Guidance button is pressed. Every other panel here is
+         filled from the one /api/stock payload a page load already pays for;
+         this one costs an LLM call on the account's own key, so it is opt-in
+         per ticker rather than something a lookup quietly triggers. -->
+    <div id="guidance-section" style="display:none;">
+      <div class="section-label">Forward Guidance<span class="label-note" id="fg-meta"></span></div>
+      <div class="section-rule"></div>
+      <div class="table-box" id="fg-box">
+        <div id="fg-body"></div>
+      </div>
+    </div>
+
+    <!-- Annual / quarterly toggle. Governs the six fundamental charts — revenue,
+         net earnings, free cash flow, EPS, profit margin, capex — and the share
+         count further down. Dividend history and the payout table stay annual,
+         which is why the dividend chart asks makeYoyPlugin for lag 1 by name
+         rather than inheriting whatever these are set to. -->
+    <div class="period-row">
+      <span class="period-row-label">Chart period</span>
+      <div class="period-toggle" id="period-toggle" role="group" aria-label="Chart period">
+        <button type="button" class="freq-btn" data-period="annual">Annual</button>
+        <button type="button" class="freq-btn" data-period="quarterly">Quarterly</button>
+      </div>
+      <span class="period-status" id="period-status"></span>
+    </div>
+
+    <div class="section-label" id="sec-revenue">Revenue — Annual</div>
+    <div class="section-rule"></div>
+    <div class="table-box" style="padding: 20px 20px 16px;">
+      <div class="chart-scroll-outer" id="revenue-scroll-outer">
+        <div class="chart-scroll-inner" id="revenue-scroll-inner">
+          <canvas id="revenueChart"></canvas>
+        </div>
+      </div>
+      <div class="chart-note" id="revenue-note" style="display:none;"></div>
+      <div id="revenue-empty" class="chart-empty" style="display:none; height:200px;">No revenue history available</div>
+    </div>
+
+    <div class="section-label" id="sec-earnings">Net Earnings — Annual</div>
     <div class="section-rule"></div>
     <div class="table-box" style="padding: 20px 20px 16px;">
       <div class="chart-scroll-outer" id="earnings-scroll-outer">
@@ -3708,7 +4497,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
       <div id="earnings-empty" class="chart-empty" style="display:none; height:200px;">No earnings history available</div>
     </div>
 
-    <div class="section-label">Free Cash Flow — Annual</div>
+    <div class="section-label" id="sec-fcf">Free Cash Flow — Annual</div>
     <div class="section-rule"></div>
     <div class="table-box" style="padding: 20px 20px 16px;">
       <div class="chart-scroll-outer" id="fcf-scroll-outer">
@@ -3716,13 +4505,14 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
           <canvas id="fcfChart"></canvas>
         </div>
       </div>
+      <div class="chart-note" id="fcf-period-note" style="display:none;"></div>
       <div id="fcf-empty" class="chart-empty" style="display:none; height:200px;">No FCF data available</div>
     </div>
 
     <div class="section-label">Balance Sheet<span class="label-note" id="bs-asof"></span></div>
     <div class="section-rule"></div>
     <div id="bs-content">
-      <div class="grid" style="grid-template-columns: repeat(6, 1fr);">
+      <div class="grid g6">
         <div class="box" style="animation-delay:0.05s">
           <div class="box-label">Current Ratio</div>
           <div class="box-value" id="b-current-ratio"></div>
@@ -3759,7 +4549,10 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
     </div>
     <div id="bs-empty" class="table-box chart-empty" style="display:none; height:100px;">No balance sheet data available.</div>
 
-    <div class="section-label">Shares Outstanding<span class="label-note" id="shares-trend"></span></div>
+    <!-- The period suffix is its own span because this heading already carries a
+         child (`shares-trend`); writing textContent on the heading would delete
+         it. The four headings that have no children are written directly. -->
+    <div class="section-label" id="sec-shares">Shares Outstanding<span id="sec-shares-period"></span><span class="label-note" id="shares-trend"></span></div>
     <div class="section-rule"></div>
     <div class="table-box" style="padding: 20px 20px 16px;">
       <div class="chart-scroll-outer" id="shares-scroll-outer">
@@ -3820,7 +4613,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
     <div id="short-interest-section" style="display:none;">
       <div class="section-label">Short Interest<span class="label-note" id="si-asof"></span></div>
       <div class="section-rule"></div>
-      <div class="grid" style="grid-template-columns: repeat(5, 1fr);">
+      <div class="grid g5">
         <div class="box" style="animation-delay:0.05s">
           <div class="box-label">Shares Short</div>
           <div class="box-value" id="b-si-shares"></div>
@@ -3892,7 +4685,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
     <div id="analyst-section" style="display:none;">
       <div class="section-label">Analyst Estimates<span class="label-note" id="analyst-count"></span></div>
       <div class="section-rule"></div>
-      <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
+      <div class="grid g4">
         <div class="box" style="animation-delay:0.05s">
           <div class="box-label">Consensus Rating</div>
           <div class="box-value" id="b-rating"></div>
@@ -3968,6 +4761,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
       <label>Date Acquired</label>
       <input type="date" id="holdings-date-input">
     </div>
+    <div id="holdings-modal-error" style="display:none;color:var(--danger);font-size:11px;margin-top:10px;"></div>
     <div class="holdings-modal-actions">
       <button onclick="closeHoldingsModal()">Cancel</button>
       <button class="holdings-modal-save" onclick="saveHolding()">Save</button>
@@ -4278,8 +5072,9 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
       <input type="number" class="dcf-input" id="dcf-fcf" placeholder="e.g. 5 055">
     </div>
     <div class="dcf-field">
-      <div class="dcf-label">Shares Outstanding (millions)</div>
-      <input type="number" class="dcf-input" id="dcf-shares" placeholder="e.g. 1 500">
+      <div class="dcf-label">Market Cap (millions)</div>
+      <input type="number" class="dcf-input" id="dcf-mcap" placeholder="e.g. 273 500">
+      <div class="dcf-hint" id="dcf-mcap-hint"></div>
     </div>
     <div class="dcf-field">
       <div class="dcf-label">Current Price</div>
@@ -4347,6 +5142,16 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
     <div class="dcf-result">
       <span class="dcf-result-label">Enterprise Value</span>
       <span class="dcf-result-val" id="dcf-ev">—</span>
+    </div>
+    <!-- Equity value is the figure margin of safety actually compares against the
+         market cap, and it was the one number in that chain the panel never
+         showed. Without it the only total on screen was enterprise value, which
+         differs from equity by net debt — so tuning the model to MoS = 0 and
+         checking the tie-out against market cap came up short by exactly the net
+         cash ($121.7B on Alphabet) with nothing on the panel to explain it. -->
+    <div class="dcf-result">
+      <span class="dcf-result-label">Equity Value</span>
+      <span class="dcf-result-val" id="dcf-equity">—</span>
     </div>
     <div class="dcf-result">
       <span class="dcf-result-label">Equity Value / Share</span>
@@ -4518,6 +5323,50 @@ const AUTH = {
   isAdmin: document.querySelector('meta[name="is-admin"]')?.content === '1',
 };
 
+// ── Request coalescing ──────────────────────────────────────────────────────
+// The server already refuses to fetch one ticker twice at once (`_stock_inflight`);
+// this is the same rule one layer out, in the browser. Two callers can
+// legitimately want the same GET at the same moment — the background prefetch is
+// partway through /api/holdings when the user clicks the Holdings tab and
+// `_loadHoldingsData` asks for it again — and without this that is two identical
+// round trips, two sets of upstream calls behind them, and a race over which
+// answer renders last.
+//
+// Keyed by URL, so it can only ever join requests that are the same question.
+// GET only: two POSTs are two intents even when they are byte-identical.
+//
+// A settled entry is kept for `ttl` and answers later callers outright, which is
+// what makes flipping between account tabs free rather than merely deduplicated.
+// A *failed* one is dropped immediately — memoising a failure would pin the
+// panel empty for the whole TTL, the same reason `_fetch_div_events` raises
+// instead of caching a blank.
+// Short enough that it only ever collapses one interaction's worth of duplicate
+// calls — a prefetch racing a tab click, or a flip to Performance and straight
+// back. Freshness is not this number's job: the account cache (ACCT_TTL, 5min)
+// governs how old data on screen may be, and a write clears this map outright.
+const GET_MEMO_TTL = 15 * 1000;
+
+const _apiGetCache = new Map();   // url -> {p, pending, ts, ttl}
+
+function apiGet(url, { ttl = 0, force = false } = {}) {
+  const hit = _apiGetCache.get(url);
+  if (hit && !force && (hit.pending || Date.now() - hit.ts < hit.ttl)) return hit.p;
+
+  const entry = { pending: true, ts: Date.now(), ttl };
+  entry.p = fetch(url)
+    .then(r => r.json())
+    .then(d => {
+      entry.pending = false;
+      entry.ts = Date.now();
+      if (!ttl) _apiGetCache.delete(url);   // dedup only — don't grow the map
+      return d;
+    })
+    .catch(e => { _apiGetCache.delete(url); throw e; });
+
+  _apiGetCache.set(url, entry);
+  return entry.p;
+}
+
 (function installAuthFetch() {
   const nativeFetch = window.fetch.bind(window);
   const SAFE = /^(GET|HEAD|OPTIONS)$/i;
@@ -4551,6 +5400,29 @@ const AUTH = {
     }
 
     return nativeFetch(input, opts).then(res => {
+      // Any successful write invalidates every memoised GET. This is the same
+      // argument that put the CSRF header here rather than at ~50 call sites:
+      // holdings, transactions, cash, sales and options are one record spread
+      // over five files, so "which GETs did this POST invalidate" has no local
+      // answer, and a per-route invalidation list is a stale-panel bug waiting
+      // for whoever adds the next mutating route. Dropping everything costs one
+      // refetch of whatever is on screen and cannot be wrong.
+      //
+      // The account cache goes with it, for the same reason and one step
+      // further. It is the *other* copy of this data — a rendered snapshot in
+      // localStorage that `_loadHoldingsData` paints from and, while it is
+      // inside ACCT_TTL, returns early on without refetching at all. So a write
+      // that left it standing did not merely show something stale for a moment;
+      // it showed the pre-write portfolio for the next five minutes. Adding a
+      // holding wrote the ledger, navigated to the Holdings tab, and rendered
+      // the list from before the add — which reads exactly like a save that
+      // silently failed, and is why a second holding entered straight after the
+      // first appeared not to register.
+      if (sameOrigin && !SAFE.test(method) && res.ok) {
+        _apiGetCache.clear();
+        _acctWrites++;
+        clearAcctCache();
+      }
       if (sameOrigin && res.status === 401) {
         const back = location.pathname + location.search;
         location.href = '/login?next=' + encodeURIComponent(back);
@@ -4823,6 +5695,170 @@ function setStatus(msg, type='') { statusEl.textContent = msg; statusEl.classNam
 // labels the frontend builds itself off `raw`. Set once per lookup, before any
 // chart is drawn. '$' is only the value before the first stock loads.
 let _curSym = { trade: '$', fin: '$' };
+
+// Which month this filer's fiscal year ends in, straight off the stock payload.
+// The forward guidance panel dates its periods against it. `null` means the
+// annual frame did not say, and the panel then prints the fiscal label with no
+// calendar span rather than a guessed one.
+let _fyeMonth = null;
+
+// ── Annual / quarterly ───────────────────────────────────────────────────────
+// One renderer draws both frequencies. `/api/stock` carries the annual series
+// and is the load path; `/api/stock/quarterly` is fetched the first time
+// somebody actually flips the toggle and memoised per ticker after that, so a
+// reader who never touches it never pays for five extra scrapes.
+//
+// The two row shapes differ in exactly one field — `{year, ...}` annually,
+// `{period, label, ...}` quarterly — which is what makes the reuse possible.
+// Read a bar's axis label through `periodLabel`, never `r.year`.
+let _chartPeriod = localStorage.getItem('chartPeriod') === 'quarterly' ? 'quarterly' : 'annual';
+let _qData       = null;   // quarterly payload for the ticker on screen
+let _qLoading    = false;
+let _renderFundamentals = null;  // set per lookup; see the wrapper in fetchStock
+
+// Annual key, then quarterly key. Every chart the toggle reaches is here.
+const PERIOD_KEYS = {
+  revenue:  ['revenue_by_year',       'revenue_by_q'],
+  earnings: ['earnings_by_year',      'earnings_by_q'],
+  eps:      ['eps_by_year',           'eps_by_q'],
+  margin:   ['profit_margin_by_year', 'margin_by_q'],
+  fcf:      ['fcf_annual',            'fcf_by_q'],
+  capex:    ['capex_by_year',         'capex_by_q'],
+};
+
+function isQuarterly() { return _chartPeriod === 'quarterly'; }
+
+// The rows a chart should draw right now.
+//
+// Falls back to the annual series whenever the quarterly payload has nothing for
+// it — a filer yfinance publishes no cash-flow frame for, or a non-US ticker
+// where Macrotrends is skipped entirely. A toggle that blanks a chart which had
+// data a moment ago reads as a broken button, and the annual series is never the
+// wrong answer, only a less specific one.
+function periodRows(data, which) {
+  const [aKey, qKey] = PERIOD_KEYS[which];
+  if (isQuarterly() && _qData && (_qData[qKey] || []).length) return _qData[qKey];
+  return (data && data[aKey]) || [];
+}
+
+// True when `periodRows` actually handed back quarterly rows for this series, so
+// a caption can say "quarters" only where the chart really is showing them.
+function periodIsQ(data, which) {
+  const [, qKey] = PERIOD_KEYS[which];
+  return isQuarterly() && !!_qData && (_qData[qKey] || []).length > 0;
+}
+
+// A bar's axis label. Annual rows carry `year`, quarterly ones `label`.
+function periodLabel(r) {
+  return (r && r.label !== undefined && r.label !== null) ? r.label : (r ? r.year : '');
+}
+
+const _Q_CASHFLOW_NOTE =
+  'Yahoo Finance reports five to six quarters. Macrotrends publishes no quarterly '
+  + 'cash-flow statement, so there is nothing deeper to merge in.';
+
+// The headings say "— Annual" in the markup, so they move with the toggle: a
+// page that draws quarters under a heading reading "Annual" is worse than one
+// with no toggle at all. Keyed by id, and every one of these is asserted by a
+// template-structure test, since a renamed id fails silently — the chart still
+// draws, only the label stops following it.
+const PERIOD_SECTIONS = [
+  ['sec-revenue',  'Revenue'],
+  ['sec-earnings', 'Net Earnings'],
+  ['sec-fcf',      'Free Cash Flow'],
+  ['sec-margin',   'Net Profit Margin'],
+  ['sec-eps',      'Earnings Per Share'],
+  ['sec-capex',    'Capital Expenditure'],
+];
+
+function syncPeriodLabels() {
+  const word = isQuarterly() ? 'Quarterly' : 'Annual';
+  PERIOD_SECTIONS.forEach(([id, title]) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = `${title} — ${word}`;
+  });
+  const shares = document.getElementById('sec-shares-period');
+  if (shares) shares.textContent = ` — ${word}`;
+  // Scoped to #period-toggle. An unscoped '.freq-btn' would be one rename away
+  // from the collision this class already had to be moved out of.
+  document.querySelectorAll('#period-toggle .freq-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.period === _chartPeriod);
+  });
+}
+
+function setPeriodStatus(text, cls) {
+  const el = document.getElementById('period-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'period-status' + (cls ? ' ' + cls : '');
+}
+
+// Fetch the quarterly payload for the ticker on screen, once.
+//
+// Memoised two ways on purpose. `apiGet` collapses concurrent callers and holds
+// the result for GET_MEMO_TTL, which covers a double click on the toggle;
+// `_qData` holds it for as long as the ticker is on screen, which covers
+// flipping back and forth. Without the second, every flip past 15 seconds would
+// pay for the round trip again on data that cannot have changed.
+async function ensureQuarterly(tkkr) {
+  if (_qData && _qData.ticker === tkkr) return _qData;
+  const payload = await apiGet(`/api/stock/quarterly?ticker=${encodeURIComponent(tkkr)}`, { ttl: 60000 });
+  if (!payload || payload.error) throw new Error((payload && payload.error) || 'Quarterly data unavailable');
+  _qData = payload;
+  return _qData;
+}
+
+// The toggle. Annual redraws immediately off the payload already in hand;
+// quarterly may need a round trip the first time, and says so rather than
+// looking frozen for a second.
+//
+// `_chartPeriod` is only committed after a successful fetch — flipping the flag
+// first and fetching second leaves the page labelled Quarterly with annual bars
+// under it if the request fails, which is the one outcome worse than not
+// switching at all.
+async function setChartPeriod(period) {
+  const want = period === 'quarterly' ? 'quarterly' : 'annual';
+  // No early return when `want` already matches `_chartPeriod`. A fresh lookup
+  // restores the saved preference by calling this with the period it is already
+  // set to — the flag survives in localStorage but `_qData` does not survive a
+  // change of ticker, so there is real work to do even when nothing "changed".
+  if (want === 'annual') {
+    _chartPeriod = 'annual';
+    localStorage.setItem('chartPeriod', 'annual');
+    setPeriodStatus('');
+    if (_renderFundamentals && _lastStock) _renderFundamentals(_lastStock);
+    if (_lastStock) renderSharesHistory(_lastStock.shares_history || {});
+    syncPeriodLabels();
+    return;
+  }
+
+  const tkkr = _lastStock && _lastStock.ticker;
+  if (!tkkr) return;
+  _qLoading = true;
+  setPeriodStatus('Loading quarters…', 'loading');
+  try {
+    await ensureQuarterly(tkkr);
+    _chartPeriod = 'quarterly';
+    localStorage.setItem('chartPeriod', 'quarterly');
+    setPeriodStatus('');
+    if (_renderFundamentals && _lastStock) _renderFundamentals(_lastStock);
+    renderSharesHistory(_lastStock.shares_history || {});
+    syncPeriodLabels();
+  } catch (e) {
+    // Left on annual deliberately, and said out loud: a silent failure here is
+    // a button that does nothing, which is the shape `saveHolding` had.
+    setPeriodStatus('Quarterly data unavailable', 'error');
+    syncPeriodLabels();
+  } finally {
+    _qLoading = false;
+  }
+}
+
+// Scoped to the toggle's own container, for the same reason the sync above is.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest && e.target.closest('#period-toggle .freq-btn');
+  if (btn) setChartPeriod(btn.dataset.period);
+});
 
 function val(id, text, cls='') {
   const el = document.getElementById(id);
@@ -5198,6 +6234,23 @@ function fmtFinLarge(v) {
 // which hangs a negative bar's label below it, into the x axis and the YoY row.
 // A negative bar's top edge is its `base`, so both signs label from the same
 // edge. `colors` is per bar, since a bar's colour carries its sign and source.
+// How many bars to step between drawn value labels so they clear each other.
+// A label per bar is fine at 40 annual bars and an unreadable smear at 157
+// quarterly ones. Measured rather than assumed: "$1.09B" and "-$143.76B" are
+// very different widths, and the chart draws in the filer's own currency symbol.
+function _labelStride(chart, meta, fmtFn) {
+  if (meta.data.length < 2) return 1;
+  const step = Math.abs(meta.data[1].x - meta.data[0].x);
+  if (!step) return 1;
+  const data = chart.data.datasets[0].data;
+  let widest = 0;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] === null || data[i] === undefined) continue;
+    widest = Math.max(widest, chart.ctx.measureText(fmtFn(data[i])).width);
+  }
+  return Math.max(1, Math.ceil((widest + 6) / step));
+}
+
 function makeTopLabelsPlugin(fmtFn, colors) {
   return {
     id: 'topLabels',
@@ -5208,7 +6261,12 @@ function makeTopLabelsPlugin(fmtFn, colors) {
       ctx.font = '600 10px Inter';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
+      // Counted back from the newest bar, so the most recent period — the one
+      // the chart scrolls to on open — is always the one that keeps its label.
+      const stride = _labelStride(chart, meta, fmtFn);
+      const last   = meta.data.length - 1;
       meta.data.forEach((bar, i) => {
+        if (stride > 1 && ((last - i) % stride)) return;
         const val = chart.data.datasets[0].data[i];
         if (val === null || val === undefined) return;
         ctx.fillStyle = (colors && colors[i]) || (val < 0 ? '#e03040' : '#00b341');
@@ -5219,8 +6277,60 @@ function makeTopLabelsPlugin(fmtFn, colors) {
   };
 }
 
+// Period-over-period % change under each bar.
+//
+// `lag` is how many bars back the comparison reaches, and it is a parameter
+// because the right answer depends on the frequency rather than on the chart.
+// Annually the previous bar is a year ago and lag 1 is correct. On a quarterly
+// series the previous bar is the previous *quarter*, so lag 1 measures
+// seasonality and prints it as growth: Apple's holiday quarter into the next one
+// reads about -24%, and the one after that about +40%, every single year, on a
+// business that grew steadily throughout. The comparison a reader wants is
+// against the same quarter a year earlier — lag 4 — which is also what
+// Macrotrends' own v3 field carries on the quarterly endpoint.
+//
+// So the dividend chart, which stays annual whatever the toggle says, asks for
+// lag 1 explicitly rather than inheriting whatever the fundamentals are using.
+function makeYoyPlugin(lag) {
+  const step = Math.max(1, lag || 1);
+  return {
+    id: 'yoyChange',
+    afterDraw(chart) {
+      const vals = chart.data.datasets[0].data;
+      if (!vals || vals.length <= step) return;
+      const ctx2 = chart.ctx;
+      const meta = chart.getDatasetMeta(0);
+      ctx2.save();
+      ctx2.font = '600 9px Inter';
+      ctx2.textAlign = 'center';
+      ctx2.textBaseline = 'bottom';
+      // Same thinning as the value labels above, and anchored the same way, so
+      // the two rows stay aligned to the same bars instead of interleaving.
+      const stride = _labelStride(chart, meta, () => '+000%');
+      const last   = meta.data.length - 1;
+      meta.data.forEach((bar, i) => {
+        if (i < step) return;
+        if (stride > 1 && ((last - i) % stride)) return;
+        const prev = vals[i - step];
+        const curr = vals[i];
+        if (prev === null || curr === null || prev === 0) return;
+        const pct  = ((curr - prev) / Math.abs(prev)) * 100;
+        const sign = pct >= 0 ? '+' : '';
+        ctx2.fillStyle = pct >= 0 ? '#00b341' : '#e03040';
+        ctx2.fillText(`${sign}${pct.toFixed(0)}%`, bar.x, chart.height - 4);
+      });
+      ctx2.restore();
+    }
+  };
+}
+
 function makeScrollableChart(canvasId, scrollInnerId, scrollOuterId, numBars, chartFactory) {
-  const MIN_BAR_WIDTH = 48;
+  // A quarterly series is four times the bars an annual one is — 157 for Apple
+  // against 40 — and at a flat 48px that is a 7,500px canvas, so the recent
+  // quarters somebody opened the chart to read sit behind a very long scroll.
+  // Narrower bars once there are many: still a wide enough target for the drag
+  // mechanic, and the chart auto-scrolls to the newest bar either way.
+  const MIN_BAR_WIDTH = numBars > 100 ? 20 : numBars > 60 ? 28 : 48;
   const canvas = document.getElementById(canvasId);
   const inner  = document.getElementById(scrollInnerId);
   const outer  = document.getElementById(scrollOuterId);
@@ -5248,15 +6358,30 @@ function srcColor(row) {
 
 // Caption the faded range, so a reader who notices the shading is told what it
 // means rather than guessing. Hidden entirely when nothing was scraped.
-function markScrapedYears(noteId, rows) {
+function markScrapedYears(noteId, rows, quarterly) {
   const note = document.getElementById(noteId);
   if (!note) return;
-  const years = rows.filter(r => r.src === 'mt').map(r => r.year);
-  note.style.display = years.length ? '' : 'none';
-  if (years.length) {
-    note.textContent = `Faded bars (${Math.min.apply(null, years)}–${Math.max.apply(null, years)}) `
-                     + 'come from Macrotrends. Yahoo Finance reports only the most recent five years.';
-  }
+  const scraped = (rows || []).filter(r => r.src === 'mt');
+  note.style.display = scraped.length ? '' : 'none';
+  if (!scraped.length) return;
+  // The ends of the filtered list, not Math.min/max over it: rows already arrive
+  // in period order, and a quarterly label is "Q3 '26" — a string, which
+  // Math.min turns into NaN and prints as "Faded bars (NaN–NaN)".
+  const from = periodLabel(scraped[0]);
+  const to   = periodLabel(scraped[scraped.length - 1]);
+  note.textContent = `Faded bars (${from}–${to}) come from Macrotrends. `
+                   + `Yahoo Finance reports only the most recent five ${quarterly ? 'quarters' : 'years'}.`;
+}
+
+// Why a chart is short in quarterly view. Macrotrends publishes no quarterly
+// cash-flow statement, so FCF and capex have nothing behind yfinance's five or
+// six columns — a five-bar chart beside a 157-bar one otherwise reads as a
+// failure rather than as the limit of what is published.
+function markPeriodNote(noteId, text) {
+  const note = document.getElementById(noteId);
+  if (!note) return;
+  note.style.display = text ? '' : 'none';
+  if (text) note.textContent = text;
 }
 
 // News doesn't depend on anything in the /api/stock payload — the backend
@@ -5311,6 +6436,15 @@ async function fetchStock() {
     const res  = await fetch(`/api/stock?ticker=${encodeURIComponent(tkkr)}`, { signal: _thisStockCtrl.signal });
     clearTimeout(_stockTimeoutId);
     const data = await res.json();
+    // A hidden ticker is not an error, so it does not get an error line. The
+    // server refuses this route for one — which is what makes a block hold
+    // against a symbol typed in full — and the notice is where the way back
+    // out lives.
+    if (res.status === 403 && data && data.blocked) {
+      currentTicker = null;
+      showBlockedNotice(data.ticker || tkkr);
+      return;
+    }
     if (!res.ok) { setStatus(data.error || 'Error fetching data.', 'error'); return; }
 
     // Before anything renders: every formatter below reads this.
@@ -5318,6 +6452,17 @@ async function fetchStock() {
       trade: data.currency_symbol || '$',
       fin:   data.financial_currency_symbol || data.currency_symbol || '$',
     };
+    _fyeMonth = Number.isFinite(data.fiscal_year_end_month)
+      ? data.fiscal_year_end_month : null;
+
+    // Kept so the annual/quarterly toggle can redraw without refetching. The
+    // quarterly payload is dropped whenever the ticker changes — it is keyed by
+    // ticker and holding it across a search would draw one company's quarters
+    // under another's name.
+    _lastStock = data;
+    if (!_qData || _qData.ticker !== data.ticker) _qData = null;
+    setPeriodStatus('');
+    syncPeriodLabels();
 
     document.getElementById('h-ticker').textContent = data.ticker.replace(/\.[A-Z]+$/, '');
     document.getElementById('h-name').textContent   = data.name;
@@ -5470,12 +6615,29 @@ async function fetchStock() {
     val('b-divy',     data.div_yield, data.div_yield !== 'N/A' ? 'green' : 'na');
     val('b-eps',      data.eps_ttm);
 
+    // ── Fundamental charts ───────────────────────────────────────────────────
+    // Wrapped in a function and handed to a module-level variable so the
+    // annual/quarterly toggle can redraw all six without refetching anything.
+    // Reassigned on every lookup, so it always closes over the payload,
+    // formatters and currency symbols of the ticker currently on screen.
+    //
+    // Every series is read through `periodRows(data, ...)`, which is the single
+    // place the toggle is consulted — reading `data.<x>_by_year` directly here
+    // is what would make one chart ignore the switch.
+    _renderFundamentals = function (data) {
+
+    // Per chart rather than once for the group. `periodRows` falls back to the
+    // annual series independently for each, so FCF can still be annual while
+    // revenue is quarterly — and lag 4 on annual bars compares 2026 against
+    // 2022 and labels it a year-over-year change.
+    const yoyFor = (which) => makeYoyPlugin(periodIsQ(data, which) ? 4 : 1);
+
     // Profit margin hover chart
     if (window.pmChartInstance) { window.pmChartInstance.destroy(); window.pmChartInstance = null; }
-    const pmData = data.profit_margin_by_year || [];
+    const pmData = periodRows(data, 'margin');
     if (pmData.length) {
       const pmCanvas = document.getElementById('pmChart');
-      const pmLabels = pmData.map(r => r.year);
+      const pmLabels = pmData.map(periodLabel);
       const pmVals   = pmData.map(r => r.margin);
       const pmColors = pmVals.map(v => v < 0 ? 'rgba(224,48,64,0.85)' : 'rgba(0,179,65,0.85)');
       window.pmChartInstance = makeScrollableChart('pmChart', 'pm-scroll-inner', 'pm-scroll-outer', pmLabels.length, (canvas) => new Chart(canvas, {
@@ -5516,8 +6678,6 @@ async function fetchStock() {
       pmExpand.classList.toggle('open');
       document.getElementById('capex-hover-box').classList.remove('active');
       document.getElementById('capex-expand').classList.remove('open');
-      document.getElementById('revenue-hover-box').classList.remove('active');
-      document.getElementById('revenue-expand').classList.remove('open');
       document.getElementById('eps-hover-box').classList.remove('active');
       document.getElementById('eps-expand').classList.remove('open');
       if (window.pmChartInstance) {
@@ -5527,72 +6687,12 @@ async function fetchStock() {
       }
     };
 
-    // Revenue chart
-    if (window.revenueChartInstance) { window.revenueChartInstance.destroy(); window.revenueChartInstance = null; }
-    const revenueData = data.revenue_by_year || [];
-    if (revenueData.length) {
-      const revLabels = revenueData.map(r => r.year);
-      const revVals   = revenueData.map(r => r.raw);
-      window.revenueChartInstance = makeScrollableChart('revenueChart', 'revenue-scroll-inner', 'revenue-scroll-outer', revLabels.length, (canvas) => new Chart(canvas, {
-        type: 'bar',
-        plugins: [ChartDataLabels],
-        data: {
-          labels: revLabels,
-          datasets: [{ data: revVals, backgroundColor: 'rgba(0,179,65,0.75)', borderColor: '#00b341', borderWidth: 0, borderRadius: 3 }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          animation: false,
-          layout: { padding: { top: 28 } },
-          plugins: {
-            legend: { display: false },
-            tooltip: { enabled: false },
-            datalabels: {
-              anchor: 'end', align: 'end', offset: 2,
-              formatter: (v) => {
-                const abs = Math.abs(v);
-                const c = _curSym.fin;
-                if (abs >= 1e12) return c + (abs/1e12).toFixed(2) + 'T';
-                if (abs >= 1e9)  return c + (abs/1e9).toFixed(2) + 'B';
-                return c + (abs/1e6).toFixed(2) + 'M';
-              },
-              color: '#00b341',
-              font: { family: 'Inter', size: 10, weight: '600' },
-            }
-          },
-          scales: {
-            x: { grid: { display: false }, ticks: { font: { family: 'Inter', size: 11 }, color: '#9ca3af' }, border: { display: false } },
-            y: { display: false }
-          }
-        }
-      }));
-    }
-
-    const revenueBox    = document.getElementById('revenue-hover-box');
-    const revenueExpand = document.getElementById('revenue-expand');
-    revenueBox.onclick = () => {
-      if (!revenueData.length) return;
-      revenueBox.classList.toggle('active');
-      revenueExpand.classList.toggle('open');
-      document.getElementById('capex-hover-box').classList.remove('active');
-      document.getElementById('capex-expand').classList.remove('open');
-      document.getElementById('pm-hover-box').classList.remove('active');
-      document.getElementById('pm-expand').classList.remove('open');
-      document.getElementById('eps-hover-box').classList.remove('active');
-      document.getElementById('eps-expand').classList.remove('open');
-      if (window.revenueChartInstance) {
-        window.revenueChartInstance.resize();
-        const outer = document.getElementById('revenue-scroll-outer');
-        if (outer) requestAnimationFrame(() => { outer.scrollLeft = outer.scrollWidth; });
-      }
-    };
-
     // Capex chart
     if (window.capexChartInstance) { window.capexChartInstance.destroy(); window.capexChartInstance = null; }
-    const capexData = data.capex_by_year || [];
+    const capexData = periodRows(data, 'capex');
+    markPeriodNote('capex-period-note', periodIsQ(data, 'capex') ? _Q_CASHFLOW_NOTE : '');
     if (capexData.length) {
-      const capexLabels = capexData.map(r => r.year);
+      const capexLabels = capexData.map(periodLabel);
       const capexVals   = capexData.map(r => r.raw);
       window.capexChartInstance = makeScrollableChart('capexChart', 'capex-scroll-inner', 'capex-scroll-outer', capexLabels.length, (canvas) => new Chart(canvas, {
         type: 'bar',
@@ -5638,8 +6738,6 @@ async function fetchStock() {
       capexExpand.classList.toggle('open');
       document.getElementById('pm-hover-box').classList.remove('active');
       document.getElementById('pm-expand').classList.remove('open');
-      document.getElementById('revenue-hover-box').classList.remove('active');
-      document.getElementById('revenue-expand').classList.remove('open');
       document.getElementById('eps-hover-box').classList.remove('active');
       document.getElementById('eps-expand').classList.remove('open');
       if (window.capexChartInstance) {
@@ -5651,10 +6749,10 @@ async function fetchStock() {
 
     // EPS by Year chart
     if (window.epsChartInstance) { window.epsChartInstance.destroy(); window.epsChartInstance = null; }
-    const epsData = data.eps_by_year || [];
-    markScrapedYears('eps-note', epsData);
+    const epsData = periodRows(data, 'eps');
+    markScrapedYears('eps-note', epsData, periodIsQ(data, 'eps'));
     if (epsData.length) {
-      const epsLabels = epsData.map(r => r.year);
+      const epsLabels = epsData.map(periodLabel);
       const epsVals   = epsData.map(r => r.raw);
       const epsColors = epsData.map(r => srcColor(r));
       window.epsChartInstance = makeScrollableChart('epsChart', 'eps-scroll-inner', 'eps-scroll-outer', epsLabels.length, (canvas) => new Chart(canvas, {
@@ -5695,8 +6793,6 @@ async function fetchStock() {
       epsExpand.classList.toggle('open');
       document.getElementById('pm-hover-box').classList.remove('active');
       document.getElementById('pm-expand').classList.remove('open');
-      document.getElementById('revenue-hover-box').classList.remove('active');
-      document.getElementById('revenue-expand').classList.remove('open');
       document.getElementById('capex-hover-box').classList.remove('active');
       document.getElementById('capex-expand').classList.remove('open');
       if (window.epsChartInstance) {
@@ -5709,47 +6805,93 @@ async function fetchStock() {
     // EPS Earnings Hit/Miss History
     renderEarningsHistory(data.earnings_history || []);
 
-    // Shared plugin: year-over-year % change drawn at bottom of each bar column
-    const yoyPlugin = {
-      id: 'yoyChange',
-      afterDraw(chart) {
-        const vals = chart.data.datasets[0].data;
-        if (!vals || vals.length < 2) return;
-        const ctx2 = chart.ctx;
-        const meta = chart.getDatasetMeta(0);
-        ctx2.save();
-        ctx2.font = '600 9px Inter';
-        ctx2.textAlign = 'center';
-        ctx2.textBaseline = 'bottom';
-        meta.data.forEach((bar, i) => {
-          if (i === 0) return;
-          const prev = vals[i - 1];
-          const curr = vals[i];
-          if (prev === null || curr === null || prev === 0) return;
-          const pct  = ((curr - prev) / Math.abs(prev)) * 100;
-          const sign = pct >= 0 ? '+' : '';
-          ctx2.fillStyle = pct >= 0 ? '#00b341' : '#e03040';
-          ctx2.fillText(`${sign}${pct.toFixed(0)}%`, bar.x, chart.height - 4);
-        });
-        ctx2.restore();
-      }
-    };
+
+    // Revenue chart — the same treatment as the net earnings chart below it:
+    // value above each bar, YoY change under it, drag across a range for the
+    // average, Macrotrends years faded and captioned. It used to be a popup
+    // hanging off the Revenue (TTM) box, drawn by ChartDataLabels with a hard
+    // green fill and no source marking, so a scraped 1990 bar was
+    // indistinguishable from a filed 2025 one.
+    //
+    // Like earnings, it sits after yoyPlugin because it uses it — the plugin is
+    // a `const` in this scope, so building the chart above its definition is a
+    // TDZ throw, not a hoist.
+    const revenueData   = periodRows(data, 'revenue');
+    const revenueEmpty  = document.getElementById('revenue-empty');
+    const revenueCanvas = document.getElementById('revenueChart');
+
+    if (window.revenueChartInstance) { window.revenueChartInstance.destroy(); window.revenueChartInstance = null; }
+    markScrapedYears('revenue-note', revenueData, periodIsQ(data, 'revenue'));
+
+    if (revenueData.length) {
+      revenueEmpty.style.display  = 'none';
+      revenueCanvas.style.display = 'block';
+
+      const revLabels    = revenueData.map(periodLabel);
+      const revVals      = revenueData.map(r => (r.raw === null || r.raw === undefined) ? null : Number(r.raw));
+      const revColors    = revenueData.map(r => srcColor(r));
+      // A scraped year's border matches its own faded fill so the crisp outline
+      // doesn't undo the fade. Revenue is only negative in pathological cases,
+      // but the sign colouring is kept rather than special-cased: an insurer
+      // booking a negative top line has to render as one.
+      const revBorders   = revenueData.map(r => r.src === 'mt' ? srcColor(r)
+                                              : r.raw < 0 ? '#e03040' : '#00b341');
+      const revLabelCols = revVals.map(v => v === null ? '#888' : v < 0 ? '#e03040' : '#00b341');
+
+      window.revenueChartInstance = makeScrollableChart('revenueChart', 'revenue-scroll-inner', 'revenue-scroll-outer', revLabels.length, (canvas) => new Chart(canvas, {
+        type: 'bar',
+        plugins: [yoyFor('revenue'), makeDragAvgPlugin(fmtFinLarge), makeTopLabelsPlugin(fmtFinLarge, revLabelCols)],
+        data: {
+          labels: revLabels,
+          datasets: [{
+            data: revVals,
+            backgroundColor: revColors,
+            borderColor: revBorders,
+            borderWidth: 1,
+            borderRadius: 3,
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: { duration: 400 },
+          layout: { padding: { top: 42, bottom: 28 } },
+          plugins: {
+            legend: { display: false },
+            tooltip: { enabled: false },
+          },
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: { font: { family: 'Inter', size: 12, weight: '500' }, color: '#9ca3af' },
+              border: { color: '#22222e' },
+            },
+            y: {
+              display: false,
+            }
+          }
+        }
+      }));
+    } else {
+      revenueCanvas.style.display = 'none';
+      revenueEmpty.style.display  = 'flex';
+    }
 
     // Net earnings chart — the same treatment as the FCF chart below it: value
     // above each bar, YoY change under it, drag across a range for the average.
     // It sits after yoyPlugin because it uses it.
-    const earningsData   = data.earnings_by_year || [];
+    const earningsData   = periodRows(data, 'earnings');
     const earningsEmpty  = document.getElementById('earnings-empty');
     const earningsCanvas = document.getElementById('earningsChart');
 
     if (window.earningsChartInstance) { window.earningsChartInstance.destroy(); window.earningsChartInstance = null; }
-    markScrapedYears('earnings-note', earningsData);
+    markScrapedYears('earnings-note', earningsData, periodIsQ(data, 'earnings'));
 
     if (earningsData.length) {
       earningsEmpty.style.display  = 'none';
       earningsCanvas.style.display = 'block';
 
-      const earningsLabels = earningsData.map(r => r.year);
+      const earningsLabels = earningsData.map(periodLabel);
       const earningsVals   = earningsData.map(r => (r.raw === null || r.raw === undefined) ? null : Number(r.raw));
       const earningsColors = earningsData.map(r => srcColor(r));
       // Same 1px edge the FCF bars carry, but only on a filed year: a scraped
@@ -5764,7 +6906,7 @@ async function fetchStock() {
 
       window.earningsChartInstance = makeScrollableChart('earningsChart', 'earnings-scroll-inner', 'earnings-scroll-outer', earningsLabels.length, (canvas) => new Chart(canvas, {
         type: 'bar',
-        plugins: [yoyPlugin, makeDragAvgPlugin(fmtFinLarge), makeTopLabelsPlugin(fmtFinLarge, earningsLabelCols)],
+        plugins: [yoyFor('earnings'), makeDragAvgPlugin(fmtFinLarge), makeTopLabelsPlugin(fmtFinLarge, earningsLabelCols)],
         data: {
           labels: earningsLabels,
           datasets: [{
@@ -5802,7 +6944,8 @@ async function fetchStock() {
     }
 
     // FCF chart
-    const fcfData = data.fcf_annual || [];
+    const fcfData = periodRows(data, 'fcf');
+    markPeriodNote('fcf-period-note', periodIsQ(data, 'fcf') ? _Q_CASHFLOW_NOTE : '');
     const fcfEmpty = document.getElementById('fcf-empty');
     const fcfCanvas = document.getElementById('fcfChart');
 
@@ -5819,7 +6962,7 @@ async function fetchStock() {
       // rounded to 2dp of its unit). Use `raw`: string-parsing `value` back into
       // a number quantised every bar — $4,567,891,234 became $4.57B → 4.57e9 —
       // and made the chart depend on the exact wording of a display format.
-      const fcfLabels = fcfData.map(r => r.year);
+      const fcfLabels = fcfData.map(periodLabel);
       const fcfIsOCF  = fcfData.map(r => r.value && r.value.includes('(OCF)'));
       const fcfRaw    = fcfData.map(r => (r.raw === null || r.raw === undefined) ? null : Number(r.raw));
 
@@ -5841,7 +6984,7 @@ async function fetchStock() {
 
       window.fcfChartInstance = makeScrollableChart('fcfChart', 'fcf-scroll-inner', 'fcf-scroll-outer', fcfLabels.length, (canvas) => new Chart(canvas, {
         type: 'bar',
-        plugins: [yoyPlugin, makeDragAvgPlugin(fmtFinLarge), makeTopLabelsPlugin(fmtFinLarge, labelColors)],
+        plugins: [yoyFor('fcf'), makeDragAvgPlugin(fmtFinLarge), makeTopLabelsPlugin(fmtFinLarge, labelColors)],
         data: {
           labels: fcfLabels,
           datasets: [{
@@ -5877,6 +7020,17 @@ async function fetchStock() {
       fcfCanvas.style.display = 'none';
       fcfEmpty.style.display  = 'flex';
     }
+
+    syncPeriodLabels();
+    };  // ── end _renderFundamentals ─────────────────────────────────────────
+    _renderFundamentals(data);
+
+    // The toggle is a saved preference, so a new lookup has to restore it — but
+    // the annual payload is what just arrived, so the charts above are drawn
+    // annual first and the quarterly series swapped in when it lands. Not
+    // awaited: five scrapes must not hold up the rest of the page, and the
+    // charts are correct (just annual) the whole time they are in flight.
+    if (isQuarterly()) setChartPeriod('quarterly');
 
     // Payout
     let payoutHtml = '';
@@ -6041,7 +7195,7 @@ async function fetchStock() {
             const sign  = net > 0 ? '+' : '';
             const main  = d.pct_available && pct !== null ? `${sign}${pct.toFixed(3)}%` : `${sign}${net.toLocaleString()}`;
             const sub   = d.pct_available && pct !== null ? `${sign}${net.toLocaleString()} sh` : '';
-            return `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:8px 10px;text-align:center;flex:1;min-width:68px;">
+            return `<div class="insider-chip" style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:8px 10px;text-align:center;flex:1;">
               <div style="font-size:10px;color:var(--muted);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:3px;">${lbl}</div>
               <div style="font-size:13px;font-weight:600;color:${color};">${main}</div>
               ${sub ? `<div style="font-size:10px;color:var(--muted);margin-top:2px;">${sub}</div>` : ''}
@@ -6186,7 +7340,9 @@ async function fetchStock() {
 
       window.divChartInstance = makeScrollableChart('divChart', 'div-scroll-inner', 'div-scroll-outer', fullYears.length, (canvas) => new Chart(canvas, {
         type: 'bar',
-        plugins: [ChartDataLabels, yoyPlugin, makeDragGrowthPlugin()],
+        // Lag 1 explicitly: dividend history is by year whatever the fundamental
+        // charts' toggle is set to, so it must not inherit their quarterly lag.
+        plugins: [ChartDataLabels, makeYoyPlugin(1), makeDragGrowthPlugin()],
         data: {
           labels: divLabels,
           datasets: [{
@@ -6320,7 +7476,9 @@ async function fetchStock() {
     currentTicker = data.ticker;
     updateWatchlistAddBtn();
     updateHoldingsBtn();
+    updateBlockBtn();
     _resetReportBtn();
+    _resetGuidanceBtn();
     currentRange  = '1d';
     window.stockDayChangePct = data.day_change_pct;  // store for 1D use
     document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
@@ -6429,7 +7587,12 @@ function renderBalanceSheet(bs, sector) {
 // the good outcome for a holder, so the trend note is green when negative.
 function renderSharesHistory(sh) {
   if (window.sharesChartInstance) { window.sharesChartInstance.destroy(); window.sharesChartInstance = null; }
-  const rows  = (sh && sh.by_year) || [];
+  // Not routed through `periodRows`: the share count lives under `shares_history`
+  // rather than at the top of the payload, so it has no annual key to pair with
+  // in PERIOD_KEYS. Same fallback rule though — annual whenever the quarterly
+  // series is missing, so the toggle can never blank a chart that had data.
+  const quarterly = isQuarterly() && !!_qData && (_qData.shares_by_q || []).length > 0;
+  const rows  = quarterly ? _qData.shares_by_q : ((sh && sh.by_year) || []);
   const outer = document.getElementById('shares-scroll-outer');
   const empty = document.getElementById('shares-empty');
   const note  = document.getElementById('shares-note');
@@ -6445,24 +7608,35 @@ function renderSharesHistory(sh) {
   outer.style.display = '';
   empty.style.display = 'none';
 
-  if (sh.change_pct != null) {
-    const shrank = sh.change_pct < 0;
-    trend.textContent = `${sh.change_pct > 0 ? '+' : ''}${sh.change_pct.toFixed(1)}% `
-                      + `${shrank ? 'buyback' : 'dilution'} since ${sh.from_year}`;
+  // `change_pct` and `from_year` on the payload describe the *annual* series, so
+  // in quarterly view the figure is recomputed off the bars actually on screen.
+  // Quoting the annual pair under a quarterly chart states a change between two
+  // endpoints the reader cannot see.
+  const qFirst = quarterly && rows.length > 1 ? rows[0].raw : null;
+  const qPct   = qFirst ? ((rows[rows.length - 1].raw - qFirst) / qFirst) * 100 : null;
+  const pct    = quarterly ? qPct : sh.change_pct;
+  const from   = quarterly ? periodLabel(rows[0]) : sh.from_year;
+
+  if (pct != null) {
+    const shrank = pct < 0;
+    trend.textContent = `${pct > 0 ? '+' : ''}${pct.toFixed(1)}% `
+                      + `${shrank ? 'buyback' : 'dilution'} since ${from}`;
     trend.className = 'label-note ' + (shrank ? 'pos' : 'neg');
   } else {
     trend.textContent = '';
     trend.className = 'label-note';
   }
 
-  const mtYears = rows.filter(r => r.src === 'mt').map(r => r.year);
-  note.style.display = mtYears.length ? '' : 'none';
-  if (mtYears.length) {
-    note.textContent = `Faded bars (${Math.min.apply(null, mtYears)}–${Math.max.apply(null, mtYears)}) `
+  // The ends of the scraped run, not Math.min/max over it — rows are already in
+  // period order, and a quarterly label is a string that Math.min turns to NaN.
+  const scraped = rows.filter(r => r.src === 'mt');
+  note.style.display = scraped.length ? '' : 'none';
+  if (scraped.length) {
+    note.textContent = `Faded bars (${periodLabel(scraped[0])}–${periodLabel(scraped[scraped.length - 1])}) `
                      + 'come from Macrotrends and are rounded to the nearest million shares.';
   }
 
-  const labels = rows.map(r => r.year);
+  const labels = rows.map(periodLabel);
   const values = rows.map(r => r.raw);   // raw, never the formatted string
   const colors = rows.map(r => r.src === 'mt' ? 'rgba(77,159,255,0.3)' : 'rgba(77,159,255,0.85)');
 
@@ -7082,6 +8256,10 @@ async function saveWlAdd() {
       body: JSON.stringify({ ticker: currentTicker, name, added: new Date().toISOString().slice(0,10) })
     });
     const items = await res.json();
+    if (!res.ok || !Array.isArray(items)) {
+      setStatus((items && items.error) || 'Could not add to watchlist.', 'error');
+      return;
+    }
     renderWatchlist(items);
     refreshWatchlistPrices(items);
     updateWatchlistAddBtn();
@@ -7154,6 +8332,428 @@ function _resetReportBtn() {
   btn.title = '';
 }
 
+// ── Forward guidance ────────────────────────────────────────────────────────
+//
+// The trigger is the button and nothing else. A stock page load draws no
+// guidance and asks the server nothing about it, because the interesting half
+// of this spends the account's Anthropic key and the figures only move when a
+// company files. So:
+//
+//   press 1  ->  GET the stored result. Free, starts nothing. Renders if there
+//                is one; runs only if this account has never looked it up.
+//   Re-check ->  POST a run. Costs tokens, and is never reached without a
+//                deliberate second press.
+//
+let _guidanceJobId = null;
+let _guidancePollInterval = null;
+let _guidanceTicker = null;
+
+function _resetGuidanceBtn() {
+  clearInterval(_guidancePollInterval);
+  _guidanceJobId = null;
+  _guidanceTicker = null;
+  const sec = document.getElementById('guidance-section');
+  if (sec) sec.style.display = 'none';
+  const meta = document.getElementById('fg-meta');
+  if (meta) meta.textContent = '';
+  const btn = document.getElementById('guidance-hero-btn');
+  if (!btn) return;
+  btn.disabled = false;
+  btn.className = 'wl-hero-btn guidance-hero-btn';
+  btn.textContent = '+ Guidance';
+  btn.onclick = showGuidance;
+  btn.title = '';
+}
+
+// Money arrives in USD millions — the unit the whole payload is normalised to,
+// so $51.4B and $3,975M sort into one column.
+function fgMoney(v) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  const a = Math.abs(v);
+  if (a >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'T';
+  if (a >= 1e3) return '$' + (v / 1e3).toFixed(1) + 'B';
+  return '$' + v.toFixed(0) + 'M';
+}
+
+function fgPct(v, signed) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  return (signed && v > 0 ? '+' : '') + v.toFixed(1) + '%';
+}
+
+// One guidance line, formatted for its unit. The unit decides, never the metric
+// name: PepsiCo's "organic revenue to increase 2-4%" is named as revenue and
+// quoted as a rate, and trusting the name puts a 3 in a column of dollars.
+function fgItemValue(it) {
+  const lo = it.value_low, hi = it.value_high, unit = it.unit || '';
+  if (lo === null || lo === undefined || lo === '') {
+    if (it.qualitative_direction) return escHtml(it.qualitative_direction) + ' YoY';
+    return 'no number given';
+  }
+  const l = Number(lo);
+  const h = Number(hi === null || hi === undefined || hi === '' ? lo : hi);
+  const band = (fmt) => (l === h ? fmt(l) : fmt(l) + ' – ' + fmt(h));
+  if (unit === 'percent') {
+    const sign = (it.is_growth && l > 0) ? '+' : '';
+    return sign + band(x => x.toFixed(1)) + '%';
+  }
+  if (unit === 'USD per share') return band(x => '$' + x.toFixed(2));
+  if (unit === 'USD millions')  return band(x => fgMoney(x));
+  if (unit === 'millions')      return band(x => x.toLocaleString() + 'M');
+  return band(x => x.toLocaleString()) + (unit ? ' ' + escHtml(unit) : '');
+}
+
+const _FG_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Month arithmetic on one integer, so a span crosses a year boundary without
+// any date handling: idx = year * 12 + (month - 1).
+const _fgIdx  = (y, m) => y * 12 + (m - 1);
+const _fgYear = i => Math.floor(i / 12);
+const _fgMon  = i => (i % 12) + 1;
+
+// Which calendar months a fiscal period actually covers.
+//
+// The label alone cannot answer this and the error is a whole year. Most filers
+// name a fiscal year for the calendar year it *ends* in — Microsoft's FY2027
+// ends June 2027 — but retailers name it for the year it *begins*: Lululemon's
+// FY2026 runs Feb 2026 to Jan 2027. NVIDIA and Lululemon both close their year
+// in January and label it the opposite way round, so no rule keyed on the
+// year-end month can separate them, and guessing prints a real-looking span
+// that is twelve months wrong.
+//
+// The filing separates them. A company guides a period that has not finished
+// yet, so of the two candidate spans the right one is the earlier that still
+// ends on or after the filing month. That settles NVIDIA (Q4 FY2026 guided in
+// Nov 2025 — the near candidate ends Jan 2026, so it is the near one) and
+// Lululemon (Q2 FY2026 guided in Jun 2026 — the near candidate ended Jul 2025,
+// so it is the far one) without either being told its own convention.
+//
+// December filers are exempt: the fiscal year *is* the calendar year, so there
+// is nothing to calibrate and they date even with no usable filing date.
+//
+// Everything else returns '' and the panel prints the fiscal label alone. A
+// missing span is what this looked like before it existed; a wrong one reads
+// exactly like a figure that was looked up.
+function fgPeriodSpan(card, fyeMonth) {
+  const M = Number(fyeMonth);
+  const Y = Number(card && card.fiscal_year);
+  if (!Number.isFinite(M) || M < 1 || M > 12) return '';
+  if (!Number.isFinite(Y) || Y < 1900) return '';
+
+  // Offsets into the fiscal year, in months from its first month.
+  const OFF = { FY: [0, 11], H1: [0, 5], H2: [6, 11],
+                Q1: [0, 2], Q2: [3, 5], Q3: [6, 8], Q4: [9, 11] };
+  const off = OFF[String((card && card.fiscal_period) || '')];
+  if (!off) return '';                 // OTHER / "" — no bounded period to date
+
+  const spanFor = shift => {
+    const startFY = _fgIdx(Y + shift, M) - 11;   // first month of that fiscal year
+    return [startFY + off[0], startFY + off[1]];
+  };
+
+  const filed = String((card && card.filing_date) || '').match(/^(\d{4})-(\d{2})/);
+  const filedIdx = filed ? _fgIdx(Number(filed[1]), Number(filed[2])) : null;
+
+  let span = spanFor(0);
+  if (M !== 12) {
+    if (filedIdx === null) return '';   // nothing to calibrate against
+    if (span[1] < filedIdx) {
+      const far = spanFor(1);
+      // Guidance reaching more than a year past the filing is outside what this
+      // calibration can vouch for — better silent than confidently a year off.
+      if (far[0] > filedIdx + 12) return '';
+      span = far;
+    }
+  }
+
+  const [a, b] = span;
+  const ay = _fgYear(a), by = _fgYear(b);
+  const am = _FG_MONTHS[_fgMon(a) - 1], bm = _FG_MONTHS[_fgMon(b) - 1];
+  if (a === b) return `${am} ${ay}`;
+  return ay === by ? `${am} – ${bm} ${by}` : `${am} ${ay} – ${bm} ${by}`;
+}
+
+const _FG_LABELS = {
+  revenue: 'revenue', operating_income: 'operating income',
+  operating_margin: 'operating margin', gross_margin: 'gross margin',
+  operating_expenses: 'operating expenses', eps_diluted: 'EPS',
+  net_income: 'net income', free_cash_flow: 'free cash flow', capex: 'capex',
+  depreciation_amortization: 'D&A', sga: 'SG&A',
+  comparable_sales: 'comparable sales', share_count: 'share count',
+  tax_rate: 'tax rate', cogs: 'COGS', interest_expense: 'interest expense',
+  fcf_margin: 'FCF margin', other_income_expense: 'other income/expense',
+  crpo: 'cRPO', content_amortization: 'content amortization',
+};
+
+function fgItemLabel(it) {
+  let name = _FG_LABELS[it.metric] || String(it.metric || '').replace(/_/g, ' ');
+  if (it.segment) name = it.segment + ' ' + name;
+  if (it.is_growth && !/margin|rate/.test(name)) name += ' growth';
+  if (it.constant_currency) name += ' (cc)';
+  return name;
+}
+
+// One headline tile. `derived` marks a figure this reconstructed rather than one
+// the company gave — the distinction the dashed border carries, and the one most
+// worth keeping, since a derived EPS is exactly the number a reader would
+// otherwise quote back as the filer's own.
+function fgStat(label, value, sub, derived, subClass) {
+  return `<div class="fg-stat${derived ? ' derived' : ''}">
+    <div class="fg-stat-label">${escHtml(label)}${derived ? ' (derived)' : ''}</div>
+    <div class="fg-stat-value">${escHtml(value)}</div>
+    ${sub ? `<div class="fg-stat-sub ${subClass || ''}">${escHtml(sub)}</div>` : ''}
+  </div>`;
+}
+
+function renderGuidance(entry) {
+  const sec  = document.getElementById('guidance-section');
+  const body = document.getElementById('fg-body');
+  const meta = document.getElementById('fg-meta');
+  if (!sec || !body) return;
+  sec.style.display = 'block';
+
+  const cards = entry.scorecards || [];
+  const items = entry.items || [];
+
+  const when  = entry.generated_at ? new Date(entry.generated_at) : null;
+  const stamp = (when && !isNaN(when))
+    ? when.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+    : '';
+  let note = stamp ? `checked ${stamp}` : '';
+  if (entry.sec_ticker && entry.sec_ticker !== entry.symbol) {
+    // The CDR case: you asked about MSFT.TO and this is Microsoft's own 8-K.
+    // Saying so is the difference between a figure you trust and one that
+    // looks like it belongs to another company.
+    note += `${note ? ' · ' : ''}filed by ${entry.sec_ticker}`;
+  }
+  if (meta) meta.textContent = note;
+
+  // Not an SEC filer this pipeline can read. The two reasons — no EDGAR
+  // presence at all, versus a foreign private issuer filing 40-F/6-K and so
+  // never an 8-K item 2.02 — need different fixes, so the reason is shown
+  // rather than flattened into "unavailable".
+  if (entry.reachable === false) {
+    body.innerHTML = `<div class="fg-empty"><strong>No SEC guidance available.</strong><br>
+      ${escHtml(entry.reason || 'This symbol does not file with EDGAR.')}</div>`;
+    return;
+  }
+
+  if (!cards.length && !items.length) {
+    const call = entry.transcripts === false
+      ? `The earnings call was <strong>not</strong> checked — add an
+         ALPHAVANTAGE_API_KEY on Settings to reach companies that guide only
+         on the call.`
+      : 'The earnings release and the earnings call were both checked.';
+    body.innerHTML = `<div class="fg-empty"><strong>No forward guidance found.</strong><br>${call}</div>`;
+    return;
+  }
+
+  const byPeriod = {};
+  items.forEach(it => {
+    const k = `${it.fiscal_year}|${it.fiscal_period}`;
+    (byPeriod[k] = byPeriod[k] || []).push(it);
+  });
+
+  const order  = ['FY', 'Q1', 'Q2', 'Q3', 'Q4', 'H1', 'H2'];
+  const sorted = cards.slice().sort((a, b) =>
+    ((a.fiscal_year || 0) - (b.fiscal_year || 0)) ||
+    (order.indexOf(a.fiscal_period) - order.indexOf(b.fiscal_period)));
+
+  // Which periods this covers, up front. The cards carry it too, but the whole
+  // point of the panel is what the company said about *when*, and that should
+  // not need a scroll to find.
+  if (meta) {
+    const names = sorted.map(c => c.period_label).filter(Boolean);
+    const shown = names.slice(0, 3).join(' · ')
+                + (names.length > 3 ? ` +${names.length - 3} more` : '');
+    meta.textContent = shown ? (note ? `${shown} · ${note}` : shown) : note;
+  }
+
+  body.innerHTML = sorted.map((c, ci) => {
+    const num = k => {
+      const v = c[k];
+      return (v === '' || v === null || v === undefined || isNaN(v)) ? null : Number(v);
+    };
+    const pick = (a, b) => (a !== null ? a : b);
+    const where = c.source === 'transcript' ? 'earnings call' : 'press release';
+
+    // Guided wins over derived wherever both exist: the derived figure is a
+    // reconstruction and only ever stands in for an absence.
+    const rev    = num('revenue_guided_mid');
+    const revG   = num('revenue_growth_pct');
+    const opInc  = num('operating_income_guided_mid');
+    const opIncD = num('derived_operating_income');
+    const eps    = num('eps_guided_mid');
+    const epsD   = num('derived_eps');
+    const fcf    = num('fcf_guided');
+    const fcfD   = num('derived_fcf');
+    const opIncG = pick(num('operating_income_growth_pct'), num('derived_op_income_growth_pct'));
+    const epsG   = pick(num('eps_growth_pct'), num('derived_eps_growth_pct'));
+    const opMgn  = num('operating_margin_pct');
+    const grMgn  = num('gross_margin_pct');
+
+    const dir = v => (v === null ? '' : v >= 0 ? 'up' : 'down');
+    const yoy = v => (v === null ? '' : fgPct(v, true) + ' YoY');
+
+    const tiles = [];
+    if (rev !== null) tiles.push(fgStat('Revenue', fgMoney(rev), yoy(revG), false, dir(revG)));
+    if (opInc !== null || opIncD !== null)
+      tiles.push(fgStat('Operating income', fgMoney(pick(opInc, opIncD)), yoy(opIncG),
+                        opInc === null, dir(opIncG)));
+    if (eps !== null || epsD !== null)
+      tiles.push(fgStat('EPS', '$' + pick(eps, epsD).toFixed(2), yoy(epsG),
+                        eps === null, dir(epsG)));
+    if (fcf !== null || fcfD !== null)
+      tiles.push(fgStat('Free cash flow', fgMoney(pick(fcf, fcfD)), '', fcf === null));
+    if (opMgn !== null)      tiles.push(fgStat('Operating margin', fgPct(opMgn), '', false));
+    else if (grMgn !== null) tiles.push(fgStat('Gross margin', fgPct(grMgn), '', false));
+
+    // Every line the company actually gave. A fixed revenue/margin/EPS grid is
+    // the wrong shape for most filers — a retailer guides operating income in
+    // dollars and comparable sales in words and never mentions either — so a
+    // complete outlook would render as a row of dashes against those columns.
+    // What was said is listed instead.
+    const mine = (byPeriod[`${c.fiscal_year}|${c.fiscal_period}`] || [])
+      .slice()
+      .sort((a, b) => (a.segment ? 1 : 0) - (b.segment ? 1 : 0) ||
+                      (a.is_growth ? 1 : 0) - (b.is_growth ? 1 : 0));
+    const rows = mine.map(it => `<tr>
+        <td>${escHtml(fgItemLabel(it))}</td>
+        <td class="fg-val">${fgItemValue(it)}</td>
+        <td class="fg-src">${it.approximated ? 'guided ~' : 'guided'}</td>
+      </tr>`).join('');
+
+    const bridge = c.derived_bridge
+      ? `<div class="fg-note"><strong>Bridge:</strong> <code>${escHtml(c.derived_bridge)}</code>
+         ${c.derived_fcf_bridge ? `<br><code>${escHtml(c.derived_fcf_bridge)}</code>` : ''}</div>` : '';
+    const banded = c.banded_fields
+      ? `<div class="fg-note">Read from a verbal scale ("mid single digit" → 4–6%), not the
+         company's own number: ${escHtml(c.banded_fields)}</div>` : '';
+    const notes = c.notes ? `<div class="fg-note">${escHtml(c.notes)}</div>` : '';
+
+    const span = fgPeriodSpan(c, _fyeMonth);
+
+    return `<div class="fg-period">
+      <div class="fg-period-head">
+        <span class="fg-period-title">${escHtml(c.period_label || 'Period unclear')}</span>
+        ${span ? `<span class="fg-period-span">${escHtml(span)}</span>` : ''}
+        <span class="fg-period-src">${escHtml(where)} · filed ${escHtml(c.filing_date || '')}</span>
+        ${ci === 0 ? `<button class="fg-refresh" id="fg-refresh-btn"
+            onclick="runGuidance()">↻ Re-check</button>` : ''}
+      </div>
+      ${tiles.length ? `<div class="fg-stats">${tiles.join('')}</div>` : ''}
+      ${rows ? `<table class="fg-rows"><tbody>${rows}</tbody></table>` : ''}
+      ${bridge}${banded}${notes}
+    </div>`;
+  }).join('');
+}
+
+function _guidanceDone(btn) {
+  btn.disabled = false;
+  btn.className = 'wl-hero-btn guidance-hero-btn done';
+  btn.textContent = 'Guidance ▾';
+  btn.title = '';
+  btn.onclick = () => {
+    const sec = document.getElementById('guidance-section');
+    if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+}
+
+// Press 1. Reads what is stored and starts nothing; runs only when this account
+// has never looked this ticker up.
+async function showGuidance() {
+  if (!currentTicker) return;
+  const btn = document.getElementById('guidance-hero-btn');
+  if (!btn) return;
+  const askedFor = _guidanceTicker = currentTicker;
+
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  try {
+    const res  = await fetch(`/api/forward_guidance?ticker=${encodeURIComponent(askedFor)}`);
+    const data = await res.json();
+    // A ticker change mid-request must not paint the previous company's
+    // guidance onto this one's page.
+    if (askedFor !== currentTicker) return;
+    if (res.ok && data.entry) {
+      renderGuidance(data.entry);
+      _guidanceDone(btn);
+      return;
+    }
+  } catch (e) {}
+  if (askedFor !== currentTicker) return;
+  // Nothing stored for this account. This is the one path that spends anything,
+  // and it is a press away from a page load rather than part of one.
+  runGuidance();
+}
+
+async function runGuidance() {
+  if (!currentTicker) return;
+  const btn = document.getElementById('guidance-hero-btn');
+  if (!btn) return;
+  const refresh = document.getElementById('fg-refresh-btn');
+  if (refresh) { refresh.disabled = true; refresh.textContent = '↻ Checking…'; }
+
+  const askedFor = _guidanceTicker = currentTicker;
+  btn.disabled = true;
+  btn.className = 'wl-hero-btn guidance-hero-btn generating';
+  btn.textContent = 'Extracting…';
+  clearInterval(_guidancePollInterval);
+
+  const fail = (msg) => {
+    btn.disabled = false;
+    btn.className = 'wl-hero-btn guidance-hero-btn errored';
+    btn.textContent = 'Guidance Failed';
+    btn.title = msg || 'Unknown error';
+    btn.onclick = runGuidance;
+    const sec  = document.getElementById('guidance-section');
+    const body = document.getElementById('fg-body');
+    if (sec && body) {
+      sec.style.display = 'block';
+      body.innerHTML = `<div class="fg-empty"><strong>Could not extract guidance.</strong><br>
+        ${escHtml(msg || 'Unknown error')}</div>`;
+    }
+  };
+
+  try {
+    const res = await fetch('/api/forward_guidance/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticker: askedFor }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.job_id) return fail(data.error || 'Failed to start');
+    _guidanceJobId = data.job_id;
+
+    _guidancePollInterval = setInterval(async () => {
+      try {
+        const poll = await fetch(`/api/forward_guidance/status/${_guidanceJobId}`);
+        const job  = await poll.json();
+        if (job.status === 'done') {
+          clearInterval(_guidancePollInterval);
+          if (askedFor !== currentTicker) return;
+          const got   = await fetch(`/api/forward_guidance?ticker=${encodeURIComponent(askedFor)}`);
+          const stored = await got.json();
+          if (askedFor !== currentTicker) return;
+          // The run reported whether the transcript fallback was available, so
+          // an empty result can say "the call was not checked" rather than
+          // leave "no guidance" standing for a company that only said it aloud.
+          if (stored.entry) {
+            renderGuidance({ ...stored.entry, transcripts: data.transcripts });
+          }
+          _guidanceDone(btn);
+        } else if (job.status === 'error') {
+          clearInterval(_guidancePollInterval);
+          if (askedFor !== currentTicker) return;
+          fail(job.error);
+        }
+      } catch (e) {}
+    }, 3000);
+  } catch (e) {
+    fail(e.message);
+  }
+}
+
 async function loadWatchlist() {
   try {
     const res = await fetch('/api/watchlist');
@@ -7173,7 +8773,11 @@ async function removeFromWatchlist(ticker) {
 }
 
 function renderWatchlist(items) {
-  if (!items || !items.length) {
+  // The saveHolding() rule, applied where the same shape can arrive: a refused
+  // POST answers {error}, and .map on that throws inside a catch that swallows
+  // it — which renders as an Add button that silently does nothing.
+  if (!Array.isArray(items)) return;
+  if (!items.length) {
     watchlistItemsEl.innerHTML = '<div class="watchlist-empty">No stocks on your watchlist yet.</div>';
     return;
   }
@@ -7229,8 +8833,10 @@ let holdingsData = [];
 
 async function loadHoldings() {
   try {
-    const res  = await fetch('/api/holdings');
-    holdingsData = await res.json();
+    // The third consumer of this payload, alongside the account prefetch and
+    // the Holdings tab. It fires at page load and the prefetch fires ~300ms
+    // later, so before the memo these were two identical requests every time.
+    holdingsData = await apiGet('/api/holdings', { ttl: GET_MEMO_TTL });
     renderHoldings(holdingsData);
     if (holdingsData.length) refreshHoldingsPrices(holdingsData);
   } catch(e) {}
@@ -7240,6 +8846,17 @@ function renderHoldings(items) {
   // sidebar panel kept for quick-add confirmation; no content needed now
 }
 
+// What the table below is drawn from. Everything else on a holdings row is
+// computed from a live quote and filled in afterwards, so two payloads with the
+// same signature produce a byte-identical table.
+function _holdingsSignature(items) {
+  return (items || []).map(i => [
+    i.ticker, i.shares, i.avg_price ?? i.price,
+    i.date_acquired || '', i.name || '', (i.lots || []).length,
+  ].join('~')).join('|');
+}
+let _hpRenderedSig = null;
+
 function renderHoldingsPage(items) {
   const emptyEl = document.getElementById('hp-empty');
   const tableEl = document.getElementById('hp-table-wrap');
@@ -7248,10 +8865,21 @@ function renderHoldingsPage(items) {
   if (!items || !items.length) {
     emptyEl.style.display = 'block';
     tableEl.style.display = 'none';
+    _hpRenderedSig = '';
     return;
   }
   emptyEl.style.display = 'none';
   tableEl.style.display = 'block';
+
+  // Redrawing an unchanged table is not free — it resets every computed cell and
+  // every summary card to "—" on the way past. On the revalidation path that is
+  // destructive: the cache had just painted real numbers, and this wiped them to
+  // redraw the identical table a beat later, which is what made a warm load look
+  // exactly like a cold one. Positions change on a trade, and a trade clears the
+  // request memo, so a signature match means there is genuinely nothing to draw.
+  const sig = _holdingsSignature(items);
+  if (sig === _hpRenderedSig && document.getElementById('hp-tbody').children.length) return;
+  _hpRenderedSig = sig;
 
   document.getElementById('hp-total-funds').textContent = '—';
   document.getElementById('hp-cash-balance').textContent = '—';
@@ -7301,10 +8929,14 @@ async function refreshHoldingsPagePrices(items) {
   items = items || [];
   const today = new Date().toISOString().slice(0, 10);
 
+  // Captured before the first fetch, not at the saves below: what makes this
+  // payload current is when its data was *read*, and everything under here
+  // takes seconds. A write landing in the middle invalidates the lot.
+  const gen = acctGen();
+
   // One request, not two: /api/cash now returns this same derived pool, so
   // fetching it separately was asking the server the same question twice.
-  const cashInvestedPromise = fetch('/api/portfolio/invested')
-    .then(r => r.json())
+  const cashInvestedPromise = apiGet('/api/portfolio/invested', { ttl: GET_MEMO_TTL })
     .catch(() => ({invested: 0, cash_pool: 0, pending_cash: 0}));
 
   const setEl = (id, html, className) => {
@@ -7359,8 +8991,7 @@ async function refreshHoldingsPagePrices(items) {
   // and only counts dividends whose pay date has passed.
   const divByTicker = {};
   try {
-    const divHistory = await fetch('/api/dividends/history');
-    const divData    = await divHistory.json();
+    const divData = await apiGet('/api/dividends/history', { ttl: GET_MEMO_TTL });
     for (const p of divData.payments || []) {
       if (p.status === 'paid') {
         divByTicker[p.ticker] = (divByTicker[p.ticker] || 0) + p.total;
@@ -7368,7 +8999,7 @@ async function refreshHoldingsPagePrices(items) {
     }
     // The dividends tab wants this exact payload. Hand it over here so
     // _prefetchAcctData doesn't fetch the same history a second time.
-    if (divData && divData.payments) saveAcctCache('dividends', divData);
+    if (divData && divData.payments) saveAcctCache('dividends', divData, gen);
   } catch(e) {}
 
   // Batch-update all return columns at once
@@ -7461,15 +9092,19 @@ async function refreshHoldingsPagePrices(items) {
       priceRet:    fmtPct(priceRet),
       priceRetCls: 'hp-summary-value ' + (priceUp ? 'gl-pos' : 'gl-neg'),
     },
-  });
+  }, gen);
   setUpdatedBar(Date.now(), false);
 }
 
 
 async function removeHolding(ticker) {
   try {
-    const res = await fetch(`/api/holdings/${encodeURIComponent(ticker)}`, { method: 'DELETE' });
-    holdingsData = await res.json();
+    const res  = await fetch(`/api/holdings/${encodeURIComponent(ticker)}`, { method: 'DELETE' });
+    const data = await res.json();
+    // Same reason as saveHolding: a refusal is an object, and letting it land in
+    // `holdingsData` breaks every later read of it rather than this one call.
+    if (!res.ok || !Array.isArray(data)) return;
+    holdingsData = data;
     renderHoldingsPage(holdingsData);
     refreshHoldingsPagePrices(holdingsData);
     updateHoldingsBtn();
@@ -7482,6 +9117,8 @@ function openAddHoldingModal() {
   document.getElementById('holdings-modal-sub').textContent = currentTicker;
   document.querySelector('#holdings-modal .holdings-modal-title').textContent =
     existing ? 'Add Lot' : 'Add to Holdings';
+  const errEl = document.getElementById('holdings-modal-error');
+  if (errEl) errEl.style.display = 'none';
   // Always clear fields — user is entering a new lot (shares + price for this purchase)
   document.getElementById('holdings-shares-input').value = '';
   document.getElementById('holdings-price-input').value  = '';
@@ -7507,11 +9144,38 @@ async function saveHolding() {
       body: JSON.stringify({ ticker: currentTicker, name, shares, price,
                              date_acquired: dateAcquired, added: new Date().toISOString().slice(0,10) }),
     });
-    holdingsData = await res.json();
+    const data = await res.json();
+    // A refusal answers `{error: ...}`, not the holdings array — 400 on a symbol
+    // that isn't one, 429 from the rate limiter, 500 from a failed rebuild.
+    // Assigning that straight to `holdingsData` used to poison it for the rest
+    // of the session: the very next line calls `.some()` on it and throws,
+    // `catch(e){}` swallows it, and the modal never closes — so the failure
+    // showed up as a Save button that did nothing, with the real reason in a
+    // console nobody has open. Everything downstream that reads `holdingsData`
+    // (`openAddHoldingModal`'s `.find`, `renderHoldingsPage`'s `.length`) was
+    // broken from then on too.
+    if (!res.ok || !Array.isArray(data)) {
+      showHoldingsModalError((data && data.error) || 'Could not save — please try again.');
+      return;
+    }
+    holdingsData = data;
     updateHoldingsBtn();
     closeHoldingsModal();
     goHoldings();
-  } catch(e) {}
+  } catch(e) {
+    showHoldingsModalError('Could not save — please try again.');
+  }
+}
+
+// The modal has nowhere to put a message, and a save that fails silently is
+// indistinguishable from a button that is not wired up. Rendered as text into
+// the modal rather than through `escHtml` + innerHTML because `textContent`
+// cannot interpret the server's string as markup at all.
+function showHoldingsModalError(msg) {
+  const el = document.getElementById('holdings-modal-error');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = 'block';
 }
 
 function updateHoldingsBtn() {
@@ -7896,9 +9560,12 @@ let _allTransactions = [];
 
 async function loadTransactionHistory() {
   try {
-    const res  = await fetch('/api/transactions');
-    const txns = await res.json();
-    renderTransactionHistory(txns);
+    // `/api/transactions` warms the corporate-actions cache for every held
+    // symbol before it can answer — the expensive call on the holdings page
+    // after the chart. It is re-issued on every visit to the tab, including the
+    // fresh-cache path that returns without fetching anything else, so the memo
+    // is what stops a flip to Performance and back from paying for it twice.
+    renderTransactionHistory(await apiGet('/api/transactions', { ttl: GET_MEMO_TTL }));
   } catch(e) {}
 }
 
@@ -8059,8 +9726,7 @@ let _sellOptionId = null;
 
 async function loadOptionsData() {
   try {
-    const res = await fetch('/api/options');
-    _allOptions = await res.json();
+    _allOptions = await apiGet('/api/options', { ttl: GET_MEMO_TTL });
   } catch(e) { _allOptions = []; }
   renderOptionsHoldings(_allOptions);
   renderOptionsHistory(_allOptions);
@@ -8415,6 +10081,15 @@ function fmtDCF(v) {
   return sign + '$' + abs.toFixed(0);
 }
 
+// A share count, for the hint under the market cap field. Separate from fmtDCF
+// because these are units, not money — a '$' on a share count reads as a value.
+function fmtShares(n) {
+  if (!isFinite(n) || n <= 0) return '—';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  return Math.round(n).toLocaleString();
+}
+
 // ── DCF Advanced Mode ─────────────────────────────────────────────────────────
 // The forecast is a list of per-year growth rates; the dollar FCF column is derived
 // from them by compounding the base FCF. Typing a dollar figure instead back-solves
@@ -8601,13 +10276,20 @@ function applyGrowthRamp() {
 
 function calcDCF() {
   const fcf     = (parseFloat(document.getElementById('dcf-fcf').value)     || 0) * 1e6;
-  const shares  = (parseFloat(document.getElementById('dcf-shares').value)  || 0) * 1e6;
+  const mcap    = (parseFloat(document.getElementById('dcf-mcap').value)    || 0) * 1e6;
   const price   =  parseFloat(document.getElementById('dcf-price').value)   || 0;
   const netdebt = (parseFloat(document.getElementById('dcf-netdebt').value) || 0) * 1e6;
   const tgr     =  parseFloat(document.getElementById('dcf-tgr-num').value)     / 100;
   const wacc    =  parseFloat(document.getElementById('dcf-wacc-num').value)    / 100;
 
-  const clear = () => ['dcf-ev','dcf-ivps','dcf-mos','dcf-tv-pct'].forEach(id => {
+  // The share count behind the cap, shown rather than asked for. Set before any
+  // early return so it tracks the two fields it describes even when the rates
+  // below make the valuation itself invalid.
+  const impliedSh = (mcap > 0 && price > 0) ? mcap / price : null;
+  document.getElementById('dcf-mcap-hint').textContent = impliedSh
+    ? `Implies ${fmtShares(impliedSh)} shares at $${price.toFixed(2)}` : '';
+
+  const clear = () => ['dcf-ev','dcf-equity','dcf-ivps','dcf-mos','dcf-tv-pct'].forEach(id => {
     const el = document.getElementById(id); el.textContent = '—'; el.className = 'dcf-result-val';
   });
 
@@ -8648,16 +10330,38 @@ function calcDCF() {
   const ev    = pv1 + pv2;
   const tvPct = ev !== 0 ? (pv2 / ev) * 100 : 0;
   const equity = ev - netdebt;
-  const ivps   = shares > 0 ? equity / shares : null;
-  // MoS is only meaningful when equity is positive; negative equity means the company
-  // is technically insolvent at this discount rate, so MoS would be nonsensical.
-  const mos    = (ivps !== null && ivps > 0 && price) ? ((ivps - price) / ivps) * 100 : null;
+  // Margin of safety is an equity-level comparison and is computed as one: the
+  // modelled equity value against the market cap, with no share count anywhere in
+  // it. Shares outstanding was the wrong input twice over — imprecise on a small
+  // count, and on a dual-class issuer simply a different number than the cap is
+  // built from (Yahoo reports BRK-B's 1.41B B shares against a cap covering both
+  // classes, so equity/shares read a third high). Market cap is reported directly
+  // and needs no reconstruction.
+  //
+  // The per-share line is then derived back out of the same two market facts —
+  // implied shares are cap/price — so it cannot disagree with the MoS above it.
+  // Algebraically (ivps - price)/ivps == (equity - mcap)/equity, which is the
+  // point: one number, expressed two ways, from one source.
+  //
+  // MoS is only meaningful when equity is positive; negative equity means the
+  // company is technically insolvent at this discount rate.
+  const mos    = (equity > 0 && mcap > 0)      ? ((equity - mcap) / equity) * 100 : null;
+  const ivps   = (impliedSh !== null)          ? equity / impliedSh              : null;
 
   document.getElementById('dcf-ev').textContent = fmtDCF(ev);
+
+  // The number MoS is computed from, shown so the comparison it makes is legible:
+  // at MoS = 0 this line equals the market cap field above, exactly. Enterprise
+  // value cannot serve that purpose because it is net of debt — it ties out to the
+  // cap only for a company holding no cash and owing nothing.
+  const eqEl = document.getElementById('dcf-equity');
+  eqEl.textContent = fmtDCF(equity);
+  eqEl.className   = 'dcf-result-val' + (equity <= 0 ? ' overvalued' : '');
 
   const ivpsEl = document.getElementById('dcf-ivps');
   if (ivps === null) {
     ivpsEl.textContent = '—';
+    ivpsEl.className   = 'dcf-result-val';
   } else if (ivps < 0) {
     ivpsEl.textContent = '-$' + Math.abs(ivps).toFixed(2);
     ivpsEl.className   = 'dcf-result-val overvalued';
@@ -8667,14 +10371,19 @@ function calcDCF() {
   }
 
   const mosEl = document.getElementById('dcf-mos');
-  if (ivps !== null && ivps <= 0) {
+  if (equity <= 0) {
     mosEl.textContent = 'Neg. equity';
     mosEl.className   = 'dcf-result-val overvalued';
   } else if (mos !== null) {
-    mosEl.textContent = (mos >= 0 ? '+' : '') + mos.toFixed(1) + '%';
-    mosEl.className   = 'dcf-result-val ' + (mos >= 20 ? 'undervalued' : mos >= 0 ? 'warn' : 'overvalued');
+    // Decide the sign and the colour from the number actually printed. At an exact
+    // break-even the float lands a hair either side of zero, so the raw value
+    // rendered '-0.0%' in red — a negative sign and a loss colour on a figure
+    // displayed as zero.
+    const shown = Math.abs(mos) < 0.05 ? 0 : mos;
+    mosEl.textContent = (shown >= 0 ? '+' : '') + shown.toFixed(1) + '%';
+    mosEl.className   = 'dcf-result-val ' + (shown >= 20 ? 'undervalued' : shown >= 0 ? 'warn' : 'overvalued');
   } else {
-    mosEl.textContent = price ? '(enter shares)' : '(enter price)';
+    mosEl.textContent = '(enter market cap)';
     mosEl.className   = 'dcf-result-val';
   }
 
@@ -8844,8 +10553,34 @@ syncPair('opt-iv',       'opt-iv-num',       false, calcOptions);
 // The advanced table compounds off this field, so calcDCF's repaint re-derives every
 // growth-driven year from the new base — no rebuild, and hand-typed dollar rows survive.
 document.getElementById('dcf-fcf').addEventListener('input', calcDCF);
-['dcf-shares','dcf-price','dcf-netdebt'].forEach(id =>
+['dcf-mcap','dcf-netdebt'].forEach(id =>
   document.getElementById(id).addEventListener('input', calcDCF));
+
+// Price gets its own handler, because margin of safety is now cap against equity
+// and neither leg carries a price — so typing in this field would move the
+// per-share line and leave MoS sitting exactly where it was, which reads as a
+// dead field on the one control a user reaches for to ask "what if it were
+// cheaper".
+//
+// A price move is a market cap move; the share count is what stays put. So the
+// cap is rescaled by the same ratio, which keeps the two fields describing one
+// company rather than one that silently gained shares between keystrokes. The
+// baseline is tracked rather than recomputed because the cap is the thing being
+// rewritten — deriving the ratio from the cap would compare a number against
+// itself and always yield 1.
+let _dcfPriceBase = null;
+
+function setDCFPriceBase(px) { _dcfPriceBase = (px > 0) ? px : null; }
+
+document.getElementById('dcf-price').addEventListener('input', () => {
+  const capEl = document.getElementById('dcf-mcap');
+  const px    = parseFloat(document.getElementById('dcf-price').value);
+  const cap   = parseFloat(capEl.value);
+  if (_dcfPriceBase > 0 && px > 0 && cap > 0)
+    capEl.value = +(cap * (px / _dcfPriceBase)).toFixed(4);
+  if (px > 0) _dcfPriceBase = px;
+  calcDCF();
+});
 ['lynch-eps','lynch-price-input','lynch-pe'].forEach(id =>
   document.getElementById(id).addEventListener('input', calcLynch));
 ['opt-spot','opt-strike','opt-ask','opt-delta'].forEach(id =>
@@ -8853,21 +10588,58 @@ document.getElementById('dcf-fcf').addEventListener('input', calcDCF);
 ['input','change'].forEach(ev =>
   document.getElementById('opt-expiry').addEventListener(ev, calcOptions));
 
+// Every field on the DCF panel is denominated in millions, and every one of them
+// used to be prefilled with `(raw / 1e6).toFixed(0)` — the nearest million. That
+// is invisible on a mega-cap and ruinous below one, in two distinct ways:
+//
+//   * it moves the figure. NVR's 2,678,153 shares became 3,000,000 (+12.0%) and
+//     MKL's 12,389,958 became 12,000,000 (-3.1%), straight onto the margin of
+//     safety.
+//   * under 500,000 it rounds to a flat zero, which the calculator reads as an
+//     empty field — so a small-cap's FCF, cap or net cash silently vanished and
+//     the panel asked the user to fill in something it had just filled in itself.
+//
+// Four decimals of a million is one currency unit of resolution on net debt and
+// one share on a count, which is past the precision of anything upstream. The
+// unary + drops the trailing zeros so the field still reads as a round number
+// when it is one.
+function toMillions(v) {
+  const n = Number(v);
+  return (v === null || v === undefined || !isFinite(n)) ? null : +(n / 1e6).toFixed(4);
+}
+
 // Auto-fill calculators when a stock loads
 function fillCalculators(data) {
   if (data.fcf_annual && data.fcf_annual.length) {
     const latest = data.fcf_annual[data.fcf_annual.length - 1];
-    if (latest && latest.raw) document.getElementById('dcf-fcf').value = (latest.raw / 1e6).toFixed(0);
+    const fcfM   = latest ? toMillions(latest.raw) : null;
+    if (fcfM !== null) document.getElementById('dcf-fcf').value = fcfM;
   }
-  if (data.shares) document.getElementById('dcf-shares').value = (data.shares / 1e6).toFixed(0);
+  // Yahoo's own marketCap first. Deriving it as shares x price is the fallback and
+  // not the rule, because sharesOutstanding is a different figure on a dual-class
+  // issuer — BRK-B's count covers the B shares alone, so the derivation lands 34%
+  // under the reported cap. The fallback exists because Yahoo omits marketCap for
+  // a stable minority of listings; it is better than an empty field, and the hint
+  // under it shows what share count the entry implies either way.
+  const _px  = parseFloat(data.price);
+  const _cap = (data.market_cap_raw != null && isFinite(data.market_cap_raw))
+    ? Number(data.market_cap_raw)
+    : ((data.shares && isFinite(_px)) ? data.shares * _px : null);
+  const capM = toMillions(_cap);
+  if (capM) document.getElementById('dcf-mcap').value = capM;
   if (data.price && data.price !== 'N/A') {
     const p = parseFloat(data.price).toFixed(2);
     document.getElementById('dcf-price').value       = p;
     document.getElementById('lynch-price-input').value = p;
     document.getElementById('opt-spot').value          = p;
+    // The baseline the price handler rescales the cap against. Assigning .value
+    // fires no input event, so seeding it here is what stops the first hand-typed
+    // price from being measured against whatever the previous ticker traded at.
+    setDCFPriceBase(parseFloat(p));
   }
-  if (data.net_debt_raw !== undefined && data.net_debt_raw !== null)
-    document.getElementById('dcf-netdebt').value = (data.net_debt_raw / 1e6).toFixed(0);
+  // Zero is a real net-debt figure, so this tests for null rather than truthiness.
+  const ndM = toMillions(data.net_debt_raw);
+  if (ndM !== null) document.getElementById('dcf-netdebt').value = ndM;
   if (data.pe_ratio && data.pe_ratio !== 'N/A')
     document.getElementById('lynch-pe').value = parseFloat(data.pe_ratio).toFixed(1);
   if (data.eps_raw !== undefined && data.eps_raw !== null)
@@ -8916,9 +10688,28 @@ function _acctCacheKey(tab) {
   return AUTH.user ? `${ACCT_CACHE_PREFIX}v4_${AUTH.user}_${tab}` : '';
 }
 
-function saveAcctCache(tab, payload) {
+// Bumped by every successful write, from the same place in the fetch wrapper
+// that clears this cache. Clearing alone is not enough: these payloads are
+// assembled over seconds of quote and dividend fetches, so a refresh that was
+// already in flight when the write landed finishes afterwards and writes the
+// pre-write portfolio back over the top — with a fresh `ts`, which makes it
+// look current for the next five minutes. That is the same failure the clear
+// exists to prevent, arriving through a race, and entering holdings quickly is
+// exactly when a write meets an in-flight refresh.
+//
+// In memory only, and deliberately: it is a token for "the server state I read",
+// meaningless across reloads, and every stored entry is dropped on a write
+// anyway. Nothing persisted carries a generation to mismatch.
+let _acctWrites = 0;
+
+// Hand the value this returns back to saveAcctCache alongside the payload it
+// describes. Capture it *before* the fetches, not after.
+function acctGen() { return _acctWrites; }
+
+function saveAcctCache(tab, payload, gen) {
   const key = _acctCacheKey(tab);
   if (!key) return;
+  if (gen !== undefined && gen !== _acctWrites) return;   // a write overtook us
   try {
     localStorage.setItem(key, JSON.stringify({ ts: Date.now(), payload }));
   } catch(e) {}
@@ -8986,22 +10777,27 @@ function setUpdatedBar(ts, refreshing) {
 }
 
 // Background prefetch — warms the account cache before the user opens the tab.
-// Waits for daily movers to finish loading and enriching first so it doesn't compete.
+// Yields to the movers burst so it doesn't contend for the browser's ~6
+// connections, but only to the burst.
 async function _prefetchAcctData() {
-  // Wait until movers has finished (initial fetch + enrichment polling)
-  await new Promise(resolve => {
-    const check = () => (!moversFetching && !moversEnrichTimer) ? resolve() : setTimeout(check, 500);
-    setTimeout(check, 2000);
-  });
+  // The old gate waited 2s, then polled every 500ms until movers had finished
+  // *and* stopped enriching. Enrichment polls once a second up to 25 times, so
+  // the user's own portfolio could start as late as t+28s — and the whole point
+  // of prefetching is to have it ready before the tab is opened. It now waits
+  // for first paint only, and not indefinitely: a movers request that hangs
+  // must not hold the account data hostage, so the race caps the wait.
+  await Promise.race([_moversReady, new Promise(r => setTimeout(r, 4000))]);
 
   // Holdings: fetch, render (hidden page), load prices → saves the holdings
   // cache, and the dividends cache too: refreshHoldingsPagePrices already
   // fetches the dividend history for the return column, so there is nothing
   // left for this prefetch to fetch. The dividend chart renders from that
   // cache when the tab is opened.
+  //
+  // Through apiGet: opening the Holdings tab while this is still in flight used
+  // to fire a second identical /api/holdings, and whichever landed last won.
   try {
-    const res = await fetch('/api/holdings');
-    const data = await res.json();
+    const data = await apiGet('/api/holdings', { ttl: GET_MEMO_TTL });
     holdingsData = data;
     renderHoldingsPage(data);
     await refreshHoldingsPagePrices(data);
@@ -9010,10 +10806,16 @@ async function _prefetchAcctData() {
   // Watchlist: lowest priority — render list then fetch prices one at a time
   loadWatchlist();
 }
-setTimeout(_prefetchAcctData, 1500);
+setTimeout(_prefetchAcctData, 250);
 
 let _acctActiveTab = 'holdings';
 function acctRefresh() {
+  // Pressing Refresh means "ask the server again", so the memo has to go —
+  // otherwise a refresh inside GET_MEMO_TTL of the last load re-renders the
+  // same numbers and looks like a button that does nothing. The per-call
+  // `force` flags below cover the top-level payload; this covers the fetches
+  // nested inside them (invested, dividend history) that take no such flag.
+  _apiGetCache.clear();
   if (_acctActiveTab === 'holdings')         _loadHoldingsData(true);
   else if (_acctActiveTab === 'performance') _loadPerformanceData(true);
   else                                       _loadDividendsData(true);
@@ -9213,6 +11015,9 @@ function _hideAllPages() {
   document.getElementById('account-page').style.display  = 'none';
   document.getElementById('settings-page').style.display = 'none';
   document.getElementById('news-page').style.display     = 'none';
+  document.getElementById('index-page').style.display    = 'none';
+  document.getElementById('blocked-page').style.display  = 'none';
+  document.getElementById('blocked-notice').style.display = 'none';
   // The only page that may not be in the document: the server renders it for
   // administrators only. Everything else here is unconditional, so a bare
   // getElementById would be right for them and a TypeError for this one — and
@@ -9343,12 +11148,17 @@ async function _loadHoldingsData(forceRefresh) {
     return;
   }
 
-  // Hide stale colors immediately — they'll reappear once fresh data loads
-  _dimHoldingsColors();
+  // Only blank the page when there is nothing to show. Blanking unconditionally
+  // threw away the cache we had just applied two lines above — the point of
+  // cache-then-revalidate is that the numbers stay on screen while the refresh
+  // runs, and wiping them to "—" makes a warm load look exactly like a cold one.
+  // The intent behind it (don't present stale green/red as current) is carried
+  // by `setUpdatedBar(..., true)`, which is on screen the whole time and says so
+  // in words.
+  if (!cached || !cached.payload) _dimHoldingsColors();
   setUpdatedBar(cached ? cached.ts : null, true);
   try {
-    const res = await fetch('/api/holdings');
-    holdingsData = await res.json();
+    holdingsData = await apiGet('/api/holdings', { ttl: GET_MEMO_TTL, force: forceRefresh });
   } catch(e) {}
   renderHoldingsPage(holdingsData);
   await refreshHoldingsPagePrices(holdingsData);  // saves cache internally
@@ -9540,10 +11350,11 @@ async function _loadPerformanceData(forceRefresh) {
   }
   setUpdatedBar(cached ? cached.ts : null, true);
 
+  const gen = acctGen();
   let positions = [], invested = 0, optionsPl = 0;
   try {
-    const res  = await fetch('/api/portfolio/performance');
-    const data = await res.json();
+    const data = await apiGet('/api/portfolio/performance',
+                              { ttl: GET_MEMO_TTL, force: forceRefresh });
     positions  = data.positions || [];
     optionsPl  = parseFloat(data.options_pl || 0);
     // External capital — the same figure the Holdings tab divides by. It ships
@@ -9621,7 +11432,7 @@ async function _loadPerformanceData(forceRefresh) {
   _renderPerfGrid();
   setUpdatedBar(Date.now(), false);
 
-  saveAcctCache('performance', { rows, summary });
+  saveAcctCache('performance', { rows, summary }, gen);
 }
 
 function _applyPerfSummary(summary) {
@@ -9844,6 +11655,7 @@ const _API_KEYS = [
   { name: 'DEEPSEEK_API_KEY',  input: 'set-deepseek',  required: false },
   { name: 'GROQ_API_KEY',      input: 'set-groq',      required: false },
   { name: 'FRED_API_KEY',      input: 'set-fred',      required: false },
+  { name: 'ALPHAVANTAGE_API_KEY', input: 'set-alphavantage', required: false },
 ];
 
 // Paint one card from the masked value the server returned. '' means the
@@ -9992,8 +11804,7 @@ function renderValuations(items) {
       <td class="val-sig-cell" id="val-sig-${ticker}"><span class="val-sig val-sig-none">—</span></td>
       <td style="color:var(--muted);font-size:12px;">${escHtml(item.notes || '')}</td>
       <td style="color:var(--muted);font-size:12px;white-space:nowrap;">${escHtml(item.added || '')}</td>
-      <td><button onclick="removeValuation('${ticker}')"
-                  style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:0 4px;"
+      <td><button class="val-remove" onclick="removeValuation('${ticker}')"
                   title="Remove">×</button></td>
     </tr>`;
   }).join('');
@@ -10193,13 +12004,17 @@ async function loadDividendChart(prefetchedData) {
   wrapEl.style.display  = 'none';
   summEl.style.display  = 'none';
 
+  const gen = acctGen();
   try {
     // If cache predates the status field, force a fresh fetch
     let data = prefetchedData;
     if (data && data.payments && data.payments.length && !('status' in data.payments[0])) {
       data = null;
     }
-    data = data || await fetch('/api/dividends/history').then(r => r.json());
+    // Same memo the Holdings tab's return column fills, so arriving here
+    // straight after a holdings load is free rather than a second walk of every
+    // held symbol's dividend history.
+    data = data || await apiGet('/api/dividends/history', { ttl: GET_MEMO_TTL });
     loadEl.style.display = 'none';
 
     if (!data.payments || !data.payments.length) {
@@ -10324,7 +12139,7 @@ async function loadDividendChart(prefetchedData) {
     }).join('');
 
     if (!prefetchedData) {
-      saveAcctCache('dividends', data);
+      saveAcctCache('dividends', data, gen);
       setUpdatedBar(Date.now(), false);
     }
 
@@ -10349,6 +12164,14 @@ let moversEnrichTimer = null;
 let moversLimit      = 10;
 let moversAllResults = [];
 
+// Resolves when the *initial* movers fetch settles — not when enrichment
+// finishes. Enrichment is a one-request-per-second trickle that polls for up to
+// 25 seconds; it never saturates the connection pool, so there is nothing to
+// yield to, and waiting it out is what pushed the account prefetch as late as
+// t+28s. `_prefetchAcctData` gates on this instead.
+let _moversPainted;
+const _moversReady = new Promise(r => { _moversPainted = r; });
+
 function skelSpan(w) { return `<span class="movers-skel" style="width:${w}px"></span>`; }
 function fmtVol(v) {
   if (!v) return '—';
@@ -10371,7 +12194,11 @@ function renderMoversTable(results) {
     const cap   = row.mkt_cap ? escHtml(row.mkt_cap) : skelSpan(56);
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="movers-ticker-cell">${escHtml(String(row.ticker))}</td>
+      <td class="movers-ticker-cell">${escHtml(String(row.ticker))}<button
+          class="row-hide-btn" data-hide="${escHtml(String(row.full_ticker || row.ticker))}"
+          data-hide-name="${escHtml(row.name || '')}"
+          title="Hide ${escHtml(String(row.full_ticker || row.ticker))} everywhere"
+          aria-label="Hide ${escHtml(String(row.full_ticker || row.ticker))}">Hide</button></td>
       <td class="movers-name-cell" id="mv-name-${idx}" title="${escHtml(row.name||'')}">${name}</td>
       <td class="movers-price-cell">${fmtMoney(row.price)}</td>
       <td class="movers-change-cell ${cls}">${arrow} ${Math.abs(row.change).toFixed(2)}%</td>
@@ -10380,7 +12207,15 @@ function renderMoversTable(results) {
       <td class="movers-bar-cell"><div class="movers-bar-bg">
         <div class="movers-bar-fill ${cls}" style="width:${barW}%"></div>
       </div></td>`;
-    tr.addEventListener('click', () => {
+    tr.addEventListener('click', (ev) => {
+      // Hide sits inside a row that navigates on click, so it has to claim the
+      // event before the row does — otherwise hiding a stock also opens it.
+      const hide = ev.target.closest('.row-hide-btn');
+      if (hide) {
+        ev.stopPropagation();
+        blockTicker(hide.dataset.hide, hide.dataset.hideName);
+        return;
+      }
       document.getElementById('tickerInput').value = row.full_ticker || row.ticker;
       fetchStock();
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -10456,6 +12291,13 @@ async function loadMovers() {
     loadEl.style.display  = 'none';
     emptyEl.style.display = 'block';
     emptyEl.textContent   = 'Failed to load movers.';
+  } finally {
+    // `finally` rather than a line at each exit: the no-data branch returns
+    // early, and a movers failure must still release the account prefetch —
+    // gating the user's own portfolio on this page succeeding would be worse
+    // than not gating it at all. Resolving twice is a no-op, so the refresh
+    // button and the exchange tabs can call this as often as they like.
+    _moversPainted();
   }
   moversFetching = false;
   if (refreshBtn) refreshBtn.classList.remove('spinning');
@@ -10499,9 +12341,554 @@ document.getElementById('bn-refresh-btn').addEventListener('click', () => {
   if (_bnPosOn) _bnLoadPositions().then(renderNewsFeed);
 });
 
-document.querySelectorAll('.movers-ex-btn').forEach(el => {
+// ── Market browser ────────────────────────────────────────────────────────────
+// The whole universe arrives in one payload, so sorting and filtering happen in
+// memory and cost no requests — the same reasoning as the news category chips.
+// Only the selector and Refresh go back to the server.
+//
+// An index is ~500 rows and an exchange is up to 3,402, which is what the three
+// arrays below are for. `_idxRows` is what arrived, `_idxSorted` is it in the
+// current sort order, and `_idxView` is that filtered. Sorting once per sort
+// *change* rather than once per keystroke is the point of the split: filtering
+// preserves order, so typing in the filter box is an O(n) scan instead of an
+// O(n log n) re-sort with a localeCompare in the comparator.
+const IDX_CHUNK = 150;        // rows drawn per pass; ~2 screens at any zoom
+let _idxKey     = 'sp500';
+let _idxRows    = [];
+let _idxSorted  = [];
+let _idxView    = [];
+let _idxShown   = 0;
+let _idxMembers = 0;
+let _idxFunds   = 0;
+let _idxHidden  = 0;
+let _idxSort    = { col: 'mkt_cap_raw', dir: -1 };
+let _idxFilter  = '';
+const _idxNum   = (n) => Number(n || 0).toLocaleString();
+
+function _idxCmp(a, b, col, dir) {
+  const av = a[col], bv = b[col];
+  // A figure Yahoo does not report sorts last in BOTH directions rather than
+  // reading as zero: a company with no trailing P/E is not the cheapest name
+  // in the index. It also cannot be arithmetic — `null - 5` is NaN, which
+  // leaves the comparator inconsistent and the sort order undefined rather
+  // than merely wrong.
+  const an = av === null || av === undefined;
+  const bn = bv === null || bv === undefined;
+  if (an || bn) return (an && bn) ? 0 : (an ? 1 : -1);
+  if (typeof av === 'string') return String(av).localeCompare(String(bv)) * dir;
+  return (av - bv) * dir;
+}
+
+function _idxRangeCell(r) {
+  if (r.week52_low === null || r.week52_high === null) {
+    return '<span class="idx-range-num">&mdash;</span>';
+  }
+  // No marker on a degenerate range — a listing younger than a year has no
+  // "where in its 52 weeks", and a dot parked at the left edge would assert
+  // that it is sitting on its low.
+  const mark = r.week52_pos === null ? '' :
+    `<div class="idx-range-mark" style="left:${(r.week52_pos * 100).toFixed(1)}%"></div>`;
+  return `<div class="idx-range">
+      <span class="idx-range-num">${fmtMoney(r.week52_low,  { currency: '' })}</span>
+      <div class="idx-range-track">${mark}</div>
+      <span class="idx-range-num">${fmtMoney(r.week52_high, { currency: '' })}</span>
+    </div>`;
+}
+
+function _idxRowHtml(r) {
+  const cls = r.change === null ? '' : (r.change >= 0 ? 'up' : 'down');
+  const chg = r.change === null ? '&mdash;'
+    : `${r.change >= 0 ? '▲' : '▼'} ${Math.abs(r.change).toFixed(2)}%`;
+  return `<tr data-sym="${escHtml(r.full_ticker)}">
+      <td class="movers-ticker-cell">${escHtml(r.ticker)}<button
+          class="row-hide-btn" data-hide="${escHtml(r.full_ticker)}"
+          data-hide-name="${escHtml(r.name || '')}"
+          title="Hide ${escHtml(r.full_ticker)} everywhere"
+          aria-label="Hide ${escHtml(r.full_ticker)}">Hide</button></td>
+      <td class="movers-name-cell" title="${escHtml(r.name || '')}">${escHtml(r.name || '')}</td>
+      <td class="movers-price-cell">${fmtMoney(r.price, { currency: r.cur_symbol })}</td>
+      <td class="movers-change-cell ${cls}">${chg}</td>
+      <td class="idx-range-cell">${_idxRangeCell(r)}</td>
+      <td class="idx-pe-cell">${r.pe === null ? '&mdash;' : r.pe.toFixed(2)}</td>
+      <td class="movers-cap-cell">${r.mkt_cap_raw === null ? '&mdash;' : escHtml(r.mkt_cap)}</td>
+    </tr>`;
+}
+
+// Says what is on screen, and stays honest about what is not. Three different
+// absences, and collapsing them would misreport every one: a name Yahoo would
+// not price is missing, a fund excluded by quoteType was never a stock, and a
+// row below the window is simply not drawn yet.
+function _idxUpdateMeta() {
+  const total    = _idxSorted.length;
+  const matched  = _idxView.length;
+  const drawn    = Math.min(_idxShown, matched);
+  const unpriced = Math.max(0, _idxMembers - _idxFunds - total);
+
+  let text = matched === total ? `${_idxNum(total)} stocks`
+                               : `${_idxNum(matched)} of ${_idxNum(total)}`;
+  if (_idxFunds)  text += ` · ${_idxNum(_idxFunds)} funds excluded`;
+  if (_idxHidden) text += ` · ${_idxNum(_idxHidden)} hidden`;
+  if (unpriced)   text += ` · ${_idxNum(unpriced)} unpriced`;
+  document.getElementById('idx-meta').textContent = text;
+
+  const more = document.getElementById('idx-more');
+  more.style.display = drawn < matched ? 'block' : 'none';
+  more.textContent   = drawn < matched
+    ? `Showing ${_idxNum(drawn)} of ${_idxNum(matched)} — scroll or click for more`
+    : '';
+}
+
+// Draw one more chunk onto what is already there. Appends rather than
+// re-rendering, so extending a 3,000-row table stays the cost of 150 rows.
+function _idxDrawMore() {
+  if (_idxShown >= _idxView.length) return;
+  const from = _idxShown;
+  _idxShown  = Math.min(_idxShown + IDX_CHUNK, _idxView.length);
+  document.getElementById('idx-tbody').insertAdjacentHTML(
+    'beforeend', _idxView.slice(from, _idxShown).map(_idxRowHtml).join(''));
+  _idxUpdateMeta();
+}
+
+// Re-filter and redraw from the top. Called on a sort click, a keystroke in the
+// filter, and a fresh payload — anything that changes which row is first.
+function renderIndexTable() {
+  const query = _idxFilter.trim().toLowerCase();
+  _idxView = query
+    ? _idxSorted.filter(r => r.ticker.toLowerCase().includes(query) ||
+                             (r.name || '').toLowerCase().includes(query))
+    : _idxSorted;
+
+  _idxShown = Math.min(IDX_CHUNK, _idxView.length);
+  // A filter that matches nothing needs to say so. The rows are already loaded,
+  // so #idx-empty — which means "this venue failed to load" — would be a lie;
+  // and an unexplained empty table under a full-looking page reads as a broken
+  // one, especially since the filter survives a switch between venues.
+  document.getElementById('idx-tbody').innerHTML =
+    (_idxSorted.length && !_idxView.length)
+      ? `<tr><td colspan="7" class="idx-nomatch">No listing here matches
+           “${escHtml(_idxFilter.trim())}”.</td></tr>`
+      : _idxView.slice(0, _idxShown).map(_idxRowHtml).join('');
+
+  document.querySelectorAll('#index-page th.idx-sort').forEach(th => {
+    const on = th.dataset.sort === _idxSort.col;
+    th.classList.toggle('active', on);
+    th.querySelector('.idx-arrow').textContent = on ? (_idxSort.dir === 1 ? '▲' : '▼') : '';
+  });
+  _idxUpdateMeta();
+
+  // The first chunk may not fill the viewport — on a short list, or a tall
+  // screen. Without this the observer never fires, because the sentinel is
+  // already on screen and never *enters* it.
+  requestAnimationFrame(_idxFillViewport);
+}
+
+// Sort the whole set, then redraw. Separate from renderIndexTable() so that
+// filtering — which happens per keystroke — never pays for a re-sort.
+function _idxResort() {
+  _idxSorted = _idxRows.slice()
+                       .sort((a, b) => _idxCmp(a, b, _idxSort.col, _idxSort.dir));
+  renderIndexTable();
+}
+
+function _idxFillViewport() {
+  const more = document.getElementById('idx-more');
+  if (more.style.display === 'none' ||
+      document.getElementById('index-page').style.display === 'none') return;
+  const box = more.getBoundingClientRect();
+  if (box.top < window.innerHeight + 200) {
+    _idxDrawMore();
+    requestAnimationFrame(_idxFillViewport);
+  }
+}
+
+// Three ways to reach the next chunk, which is one more than looks necessary.
+// The observer is the cheap path and the right one. It is backed up because its
+// failure mode is silent and total — a table frozen at 150 rows under a line
+// that says "scroll for more" — and because the environment this was verified
+// in does not composite frames, so IntersectionObserver never fires there at
+// all and the backstop is the only part that could be proven to work.
+new IntersectionObserver((entries) => {
+  if (entries.some(e => e.isIntersecting)) _idxDrawMore();
+}, { rootMargin: '400px' }).observe(document.getElementById('idx-more'));
+
+// Passive and coalesced to one check per frame. _idxFillViewport() returns
+// immediately unless this page is on screen with rows still to draw, so the
+// cost on every other page is one style read per frame of scrolling.
+let _idxScrollQueued = false;
+window.addEventListener('scroll', () => {
+  if (_idxScrollQueued) return;
+  _idxScrollQueued = true;
+  requestAnimationFrame(() => { _idxScrollQueued = false; _idxFillViewport(); });
+}, { passive: true });
+
+// And a click, so the next chunk is reachable by a deliberate action rather
+// than only as a side effect of scrolling — the one path that cannot fail
+// quietly, and the only one that works with a keyboard.
+document.getElementById('idx-more').addEventListener('click', _idxDrawMore);
+
+async function loadIndex(force = false) {
+  const loadEl   = document.getElementById('idx-loading');
+  const emptyEl  = document.getElementById('idx-empty');
+  const scrollEl = document.getElementById('idx-table-scroll');
+  const btn      = document.getElementById('idx-refresh-btn');
+  const key      = _idxKey;
+
+  emptyEl.style.display = 'none';
+  if (!_idxRows.length || force) {
+    const tab = document.querySelector(`#index-page .movers-ex-btn[data-idx="${key}"]`);
+    document.getElementById('idx-loading-label').textContent =
+      `Loading ${tab ? tab.textContent.trim() : 'listings'}…`;
+    loadEl.style.display   = 'flex';
+    scrollEl.style.display = 'none';
+  }
+  btn.classList.add('spinning');
+
+  const fail = (msg) => {
+    _idxRows = []; _idxSorted = []; _idxView = [];
+    _idxMembers = 0; _idxFunds = 0; _idxHidden = 0; _idxShown = 0;
+    document.getElementById('idx-tbody').innerHTML = '';
+    document.getElementById('idx-meta').textContent = '';
+    document.getElementById('idx-more').style.display = 'none';
+    emptyEl.textContent    = msg;
+    emptyEl.style.display  = 'block';
+    scrollEl.style.display = 'none';
+  };
+
+  try {
+    // /api/listing rather than /api/index: the same endpoint under both names,
+    // but an exchange is not an index and the URL should not say it is.
+    const data = await apiGet(`/api/listing/${key}`, { ttl: 60000, force });
+    // The selector may have moved while this was in flight. Painting a late
+    // response over the index now on screen is the defect acctGen() exists to
+    // stop, one layer down — and here the two payloads look identical.
+    if (key !== _idxKey) return;
+
+    if (!data || data.error || !Array.isArray(data.rows) || !data.rows.length) {
+      fail((data && data.error) || 'No data available.');
+      return;
+    }
+    _idxRows    = data.rows;
+    _idxMembers = data.members || data.rows.length;
+    _idxFunds   = data.funds || 0;
+    _idxHidden  = data.hidden || 0;
+    _idxResort();
+    scrollEl.style.display = 'block';
+  } catch (e) {
+    if (key === _idxKey) fail('Failed to load this index.');
+  } finally {
+    if (key === _idxKey) {
+      loadEl.style.display = 'none';
+      btn.classList.remove('spinning');
+    }
+  }
+}
+
+function goIndexes() {
+  _hideAllPages();
+  document.getElementById('index-page').style.display = 'block';
+  _setActiveNav('indexes');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  // Keyed on having rows rather than a "loaded" flag, so navigating back after
+  // a failed load retries instead of showing the empty state for good.
+  if (!_idxRows.length) loadIndex();
+}
+
+document.querySelectorAll('#index-page .movers-ex-btn').forEach(el => {
   el.addEventListener('click', () => {
-    document.querySelectorAll('.movers-ex-btn').forEach(b => b.classList.remove('active'));
+    if (el.dataset.idx === _idxKey) return;
+    document.querySelectorAll('#index-page .movers-ex-btn')
+            .forEach(b => b.classList.remove('active'));
+    el.classList.add('active');
+    _idxKey  = el.dataset.idx;
+    _idxRows = [];        // so the spinner shows rather than the old universe
+    _idxSorted = []; _idxView = []; _idxShown = 0; _idxHidden = 0;
+    document.getElementById('idx-tbody').innerHTML = '';
+    document.getElementById('idx-more').style.display = 'none';
+    document.getElementById('idx-meta').textContent = '';
+    loadIndex();
+  });
+});
+
+document.querySelectorAll('#index-page th.idx-sort').forEach(th => {
+  th.addEventListener('click', () => {
+    const col = th.dataset.sort;
+    // The same column flips; a new one starts descending — biggest cap, best
+    // day, richest multiple first — except the two text columns, where A-Z is
+    // the answer anyone clicking them wants.
+    if (_idxSort.col === col) _idxSort.dir = -_idxSort.dir;
+    else _idxSort = { col, dir: (col === 'ticker' || col === 'name') ? 1 : -1 };
+    _idxResort();
+    // Back to the top of the table: a sort you cannot see the head of reads as
+    // nothing having happened, and at 3,400 rows you are usually well down the
+    // page by the time you reach for a header.
+    document.getElementById('idx-table-scroll')
+            .scrollIntoView({ block: 'start', behavior: 'smooth' });
+  });
+});
+
+// Delegated rather than a listener per row: an index runs to ~500 rows and the
+// tbody is rebuilt on every sort and every keystroke in the filter, so
+// per-row binding would re-attach 500 listeners per character typed.
+document.getElementById('idx-tbody').addEventListener('click', (ev) => {
+  // Before the row, for the same reason as the movers table: the whole row is
+  // the click target, and Hide must not also open what it just hid.
+  const hide = ev.target.closest('.row-hide-btn');
+  if (hide) {
+    ev.stopPropagation();
+    blockTicker(hide.dataset.hide, hide.dataset.hideName);
+    return;
+  }
+  const tr = ev.target.closest('tr[data-sym]');
+  if (!tr) return;
+  document.getElementById('tickerInput').value = tr.dataset.sym;
+  fetchStock();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+});
+
+// Debounced: a keystroke re-filters up to 3,402 rows and redraws the first
+// chunk, which is cheap but not free, and holding a key down fires it per
+// repeat. Short enough not to feel laggy on a 500-row index.
+let _idxFilterTimer = null;
+document.getElementById('idx-filter').addEventListener('input', (ev) => {
+  _idxFilter = ev.target.value;
+  clearTimeout(_idxFilterTimer);
+  _idxFilterTimer = setTimeout(renderIndexTable, 90);
+});
+
+// ── Hidden stocks ─────────────────────────────────────────────────────────────
+// The server is what enforces a block: every route that offers a stock you did
+// not name drops hidden symbols on the way out, and /api/stock answers 403 for
+// one. Nothing here is a substitute for that.
+//
+// What this copy is for is the moment straight after a click. The movers table
+// and the market browser are already in memory — an exchange is 876KB of it —
+// so removing the row locally is what makes Hide feel like it did something,
+// without re-downloading a whole venue to drop one line from it.
+let _blockedRows = [];
+let _blocked     = new Set();
+
+function _setBlocked(items) {
+  _blockedRows = Array.isArray(items) ? items : [];
+  _blocked = new Set(_blockedRows.map(r => String(r.ticker || '').toUpperCase()));
+}
+
+// full_ticker first, matching the server: `ticker` is the display spelling on a
+// movers or index row — 'SHOP' for SHOP.TO — so keying on it would hide a
+// different company's listing on a different venue.
+const _rowSym = (r) => String(r.full_ticker || r.ticker || '').toUpperCase();
+
+async function loadBlocked() {
+  try {
+    const data = await apiGet('/api/blocked', { ttl: GET_MEMO_TTL });
+    if (data && Array.isArray(data.items)) _setBlocked(data.items);
+  } catch (e) {}
+  return _blockedRows;
+}
+
+// Drop the row from whatever is on screen. Only ever removes, so it cannot
+// invent a row the server would have filtered — the unhide direction is
+// _resetDiscoveryViews() below, which refetches instead of guessing.
+function _applyBlockedToViews() {
+  const keep = (rows) => rows.filter(r => !_blocked.has(_rowSym(r)));
+
+  if (moversAllResults.length) {
+    moversAllResults = keep(moversAllResults);
+    renderMoversTable(moversAllResults.slice(0, moversLimit));
+    updateExpandBtn();
+  }
+  if (_idxRows.length) {
+    const before = _idxRows.length;
+    _idxRows = keep(_idxRows);
+    // `members` is the universe as this account sees it, and the meta line
+    // derives "unpriced" from members − funds − rows. Leave it alone and every
+    // name just hidden is reported as one Yahoo would not price.
+    _idxMembers -= (before - _idxRows.length);
+    _idxHidden  += (before - _idxRows.length);
+    _idxResort();
+  }
+  if (currentTicker) updateBlockBtn();
+}
+
+// Unhiding cannot be applied in memory the way hiding can: the row was filtered
+// out server-side, so it is not here to put back. Both tables are dropped so the
+// next visit refetches — the DELETE already cleared the GET memo, so that is a
+// real request rather than a replay of the filtered payload.
+function _resetDiscoveryViews() {
+  _idxRows = []; _idxSorted = []; _idxView = [];
+  _idxShown = 0; _idxMembers = 0; _idxFunds = 0; _idxHidden = 0;
+  document.getElementById('idx-tbody').innerHTML = '';
+  document.getElementById('idx-meta').textContent = '';
+  document.getElementById('idx-more').style.display = 'none';
+  moversAllResults = [];
+  loadMovers();
+  // goIndexes() refetches on an empty _idxRows, so dropping them is enough for
+  // the next visit — but not if this page is the one on screen, where it would
+  // leave a blank table with no way to refill it but a Refresh click. No
+  // unhide control reaches here today; the guard is for the third one.
+  if (document.getElementById('index-page').style.display !== 'none') loadIndex(true);
+}
+
+async function blockTicker(ticker, name) {
+  const sym = String(ticker || '').trim().toUpperCase();
+  if (!sym || _blocked.has(sym)) return false;
+
+  let data;
+  try {
+    const res = await fetch('/api/blocked', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticker: sym, name: name || '' }),
+    });
+    data = await res.json();
+    // The saveHolding() rule: a 400, a 409 or a 500 answers {error}, and
+    // assigning that to the array poisons every read of it for the rest of the
+    // session. Checked before it is trusted, and the reason is shown rather
+    // than left in a console nobody has open.
+    if (!res.ok || !data || !Array.isArray(data.items)) {
+      setStatus((data && data.error) || `Could not hide ${sym}.`, 'error');
+      return false;
+    }
+  } catch (e) {
+    setStatus(`Could not hide ${sym}.`, 'error');
+    return false;
+  }
+
+  _setBlocked(data.items);
+  _applyBlockedToViews();
+  // Said plainly, because "hidden" invites the reading that the position went
+  // with it. It did not, and a Holdings tab that still lists the stock would
+  // otherwise read as the block having silently failed.
+  setStatus(data.held
+    ? `${sym} hidden — you still hold it, so Holdings and Performance are unchanged.`
+    : `${sym} hidden. Undo it under Hidden.`, 'success');
+  return true;
+}
+
+async function unblockTicker(ticker) {
+  const sym = String(ticker || '').trim().toUpperCase();
+  if (!sym) return false;
+  try {
+    const res  = await fetch(`/api/blocked/${encodeURIComponent(sym)}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok || !data || !Array.isArray(data.items)) {
+      setStatus((data && data.error) || `Could not unhide ${sym}.`, 'error');
+      return false;
+    }
+    _setBlocked(data.items);
+  } catch (e) {
+    setStatus(`Could not unhide ${sym}.`, 'error');
+    return false;
+  }
+  renderBlockedPage();
+  _resetDiscoveryViews();
+  loadWatchlist();
+  if (currentTicker) updateBlockBtn();
+  return true;
+}
+
+function _blkDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d) ? '—'
+    : d.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function renderBlockedPage() {
+  const tbody  = document.getElementById('blk-tbody');
+  const scroll = document.getElementById('blk-table-scroll');
+  const empty  = document.getElementById('blk-empty');
+  const n      = _blockedRows.length;
+
+  document.getElementById('blk-meta').textContent =
+    n ? `${n} stock${n === 1 ? '' : 's'}` : '';
+
+  if (!n) {
+    tbody.innerHTML = '';
+    scroll.style.display = 'none';
+    empty.style.display  = 'block';
+    return;
+  }
+  empty.style.display  = 'none';
+  scroll.style.display = 'block';
+  // Newest first: the row you want is almost always the one you just hid.
+  tbody.innerHTML = _blockedRows.slice().reverse().map(r => `
+    <tr>
+      <td class="movers-ticker-cell">${escHtml(String(r.ticker || ''))}</td>
+      <td class="movers-name-cell" title="${escHtml(r.name || '')}">${escHtml(r.name || '—')}</td>
+      <td class="blk-date">${escHtml(_blkDate(r.blocked))}</td>
+      <td class="blk-action-cell">
+        <button class="settings-btn sm" data-unhide="${escHtml(String(r.ticker || ''))}">Unhide</button>
+      </td>
+    </tr>`).join('');
+}
+
+// Delegated, so a redraw cannot leave a listener behind on a detached row.
+document.getElementById('blk-tbody').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-unhide]');
+  if (btn) unblockTicker(btn.dataset.unhide);
+});
+
+// Hiding the stock you are looking at closes the page you are looking at —
+// /api/stock refuses it from the next request on, so leaving the dashboard up
+// would show a view the server would no longer serve. Straight to the notice,
+// which carries Unhide.
+async function blockCurrentTicker() {
+  if (!currentTicker) return;
+  const sym  = currentTicker;
+  const name = document.getElementById('h-name').textContent || '';
+  if (!await blockTicker(sym, name)) return;
+  // Cleared for the same reason the 403 path in fetchStock clears it: the page
+  // it names is closed and will not reopen while the block stands, and every
+  // hero control reads this to decide what it is acting on.
+  currentTicker = null;
+  showBlockedNotice(sym);
+}
+
+// The hero button only ever says Hide: the un-hidden state is the only one this
+// page is ever rendered in, because a hidden ticker never gets a dashboard.
+function updateBlockBtn() {
+  const btn = document.getElementById('block-hero-btn');
+  if (btn) btn.disabled = !currentTicker;
+}
+
+function showBlockedNotice(sym) {
+  _hideAllPages();
+  // _hideAllPages clears the status text but not its class, and fetchStock
+  // leaves it on 'loading' — an empty element still styled mid-request.
+  setStatus('');
+  const box = document.getElementById('blocked-notice');
+  document.getElementById('blocked-notice-title').textContent = `${sym} is hidden.`;
+  document.getElementById('blocked-notice-unhide').onclick = async () => {
+    if (!await unblockTicker(sym)) return;
+    box.style.display = 'none';
+    document.getElementById('tickerInput').value = sym;
+    fetchStock();
+  };
+  box.style.display = 'flex';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function goHidden() {
+  _hideAllPages();
+  document.getElementById('blocked-page').style.display = 'block';
+  _setActiveNav('hidden');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  renderBlockedPage();      // whatever is already known, immediately
+  await loadBlocked();
+  renderBlockedPage();
+}
+
+document.getElementById('idx-refresh-btn').addEventListener('click', () => loadIndex(true));
+
+// Scoped to #home-movers. These buttons share the .movers-ex-btn class with the
+// market browser's selector — deliberately, they are the same control — so an
+// unscoped query bound this handler to those too: clicking "Nasdaq-100" on the
+// market page also set moversExchange to undefined, cleared the active state on
+// the real movers tabs and fired a movers reload for a venue that is not one.
+document.querySelectorAll('#home-movers .movers-ex-btn').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('#home-movers .movers-ex-btn')
+            .forEach(b => b.classList.remove('active'));
     el.classList.add('active');
     moversExchange = el.dataset.ex;
     moversLimit = 10;
@@ -10520,7 +12907,12 @@ document.querySelectorAll('.movers-dir-btn').forEach(el => {
 document.getElementById('movers-refresh-btn').addEventListener('click', () => {
   if (!moversFetching) loadMovers();
 });
-setTimeout(() => loadMovers(), 1500);
+// Immediately, not on a 1.5s timer. Movers is the page the app opens on, so
+// this is the one request the user is actually waiting for — the delay existed
+// to let the ticker tape go first, and the tape is a single batched /api/quotes
+// call now rather than the ~100 it fired when that timer was written. Two
+// concurrent requests do not need staggering.
+loadMovers();
 
 // Movers is what the page opens on, so the nav has to say so. Without this the
 // first thing a visitor sees is a nav with nothing highlighted, which reads as

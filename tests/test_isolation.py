@@ -25,6 +25,11 @@ PW = 'a-strong-test-password'
 ALPHA_TICKER = 'ZALPHA'
 ALPHA_NOTE   = 'PRIVATE-NOTE-OF-ALPHA'
 ALPHA_KEY    = 'gsk-PRIVATE-API-KEY-OF-ALPHA'
+# What alpha has chosen not to see. A separate symbol from ALPHA_TICKER so the
+# seed does not collide with the mirror test — a blocked ticker is filtered out
+# of alpha's own watchlist, which is correct and would look like a leak the
+# other way round.
+ALPHA_HIDDEN = 'ZHIDDEN'
 
 
 @pytest.fixture
@@ -66,6 +71,7 @@ def _seed_alpha(alpha):
                              'contracts': 1, 'buy_price': 1.5,
                              'buy_date': '2026-01-06'}),
         ('/api/settings',   {'GROQ_API_KEY': ALPHA_KEY}),
+        ('/api/blocked',    {'ticker': ALPHA_HIDDEN, 'name': 'Hidden Co'}),
     ]
     for path, payload in posts:
         res = alpha.post(path, json=payload)
@@ -73,6 +79,18 @@ def _seed_alpha(alpha):
         # pass for the wrong reason.
         assert res.status_code in (200, 201), \
             f'seeding {path} failed: {res.status_code} {res.get_data(as_text=True)[:200]}'
+
+    # Guidance has no seeding route — it is written by the worker thread once a
+    # run finishes — so it is seeded through the same function that thread uses.
+    # Without this the sweep would walk /api/forward_guidance against an empty
+    # store and pass because there was nothing to leak.
+    terminal._merge_guidance('alpha', ALPHA_TICKER, {
+        'symbol': ALPHA_TICKER, 'sec_ticker': ALPHA_TICKER, 'reachable': True,
+        'reason': 'US-listed', 'generated_at': '2026-08-12T00:00:00+00:00',
+        'scorecards': [{'ticker': ALPHA_TICKER, 'period_label': 'FY2026',
+                        'notes': ALPHA_NOTE}],
+        'items': [{'ticker': ALPHA_TICKER, 'metric': 'revenue'}],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +305,10 @@ def test_market_data_is_shared(two_users, monkeypatch):
 # every_per_user_route below is for.
 _PER_USER_GETS = [
     '/api/watchlist', '/api/holdings', '/api/transactions', '/api/sales',
-    '/api/options', '/api/valuations', '/api/cash',
+    '/api/options', '/api/valuations', '/api/cash', '/api/blocked',
     '/api/settings', '/api/portfolio/invested', '/api/portfolio/performance',
     '/api/dividends', '/api/holdings/chart?range=1Y', '/api/news/positions',
+    '/api/forward_guidance',
 ]
 
 
@@ -305,10 +324,40 @@ def test_no_marker_of_alphas_appears_anywhere_for_beta(two_users, monkeypatch):
         res = beta.get(path)
         assert res.status_code == 200, f'{path} -> {res.status_code}'
         body = res.get_data(as_text=True)
-        for marker in (ALPHA_TICKER, ALPHA_NOTE, ALPHA_KEY):
+        for marker in (ALPHA_TICKER, ALPHA_NOTE, ALPHA_KEY, ALPHA_HIDDEN):
             if marker in body:
                 leaks.append(f'{path} leaked {marker}')
     assert leaks == [], '\n'.join(leaks)
+
+
+def test_one_accounts_block_does_not_hide_anything_from_another(two_users, monkeypatch):
+    """A block is a preference, not a fact about the stock.
+
+    The caches it filters — movers, the tape, the index payload — are shared
+    market data built once for everybody, so the filtering has to happen per
+    reader on the way out. Getting that wrong would be invisible in a
+    single-account test and would hide alpha's choices from beta's screen.
+    """
+    alpha, beta = two_users
+    _seed_alpha(alpha)
+
+    monkeypatch.setitem(terminal._movers_cache, 'TSX', {
+        'gainers': [{'ticker': ALPHA_HIDDEN, 'full_ticker': ALPHA_HIDDEN,
+                     'name': 'Hidden Co', 'change': 5.0}],
+        'losers': [], 'ts': terminal._time_mod.time(),
+    })
+
+    assert alpha.get('/api/movers?exchange=TSX').get_json()['results'] == []
+    assert [r['ticker'] for r in
+            beta.get('/api/movers?exchange=TSX').get_json()['results']] == [ALPHA_HIDDEN]
+
+    # And the detail page: refused for the account that hid it, served to the
+    # one that did not. Stubbed rather than fetched — the assertion is about who
+    # gets past the gate, and reaching Yahoo for it would make this a live test.
+    monkeypatch.setattr(terminal, '_cached_stock',
+                        lambda t: ({'ticker': t, 'name': 'Hidden Co'}, False))
+    assert alpha.get(f'/api/stock?ticker={ALPHA_HIDDEN}').status_code == 403
+    assert beta.get(f'/api/stock?ticker={ALPHA_HIDDEN}').status_code == 200
 
 
 def test_alpha_still_sees_alphas_own_data(two_users, monkeypatch):

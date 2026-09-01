@@ -222,25 +222,43 @@ _MtSeries = collections.namedtuple(
 )
 
 # `type` doubles as the Referer slug. Units are NOT consistent between metrics:
-# net income and the share count come in billions, FCF and capex in millions,
-# margin and EPS in their own units. Same endpoint, same field, different scale.
+# revenue, net income and the share count come in billions, FCF and capex in
+# millions, margin and EPS in their own units. Same endpoint, same field,
+# different scale — checked per series rather than assumed, because a company
+# with $17M of revenue serves `0.017` on the same line Apple serves `416.161`.
 _MT_SERIES = {
     'fcf':      _MtSeries('free-cash-flow',                 'cash-flow-statement', 1e6, tol_abs=5e6),
     'capex':    _MtSeries('capital-expenditures',           'cash-flow-statement', 1e6, tol_abs=5e6, absolute=True),
     'margin':   _MtSeries('net-profit-margin',              'income-statement',    1.0, places=2, tol_abs=0.5),
     'shares':   _MtSeries('shares-outstanding',             'income-statement',    1e9, tol_abs=1e6,
                           min_scale=_MT_SHARES_MIN, positive_only=True),
+    'revenue':  _MtSeries('revenue',                        'income-statement',    1e9, tol_abs=5e6),
     'earnings': _MtSeries('net-income',                     'income-statement',    1e9, tol_abs=5e6),
     'eps':      _MtSeries('eps-earnings-per-share-diluted', 'income-statement',    1.0, places=4, tol_abs=0.02),
 }
 
 # What a stock lookup actually merges. `capex` is scraped only by the debug
 # routes — the capex chart is pure yfinance.
-_MT_LOOKUP_METRICS = ('fcf', 'margin', 'shares', 'earnings', 'eps')
+_MT_LOOKUP_METRICS = ('fcf', 'margin', 'shares', 'revenue', 'earnings', 'eps')
+
+# Which of those have a quarterly page at all. The split is by statement, not by
+# company: every income-statement series serves real quarters on `freq=Q`, and
+# neither cash-flow-statement one does — `free-cash-flow` hands back the annual
+# payload unchanged and `capital-expenditures` 404s. Checked across ten tickers
+# spanning mega-caps, a bank, a small-cap and two recent IPOs; identical every
+# time. So FCF and capex go quarterly on yfinance's five or six columns and say
+# in the UI why they are short, and nothing here wastes a request discovering
+# that again on every lookup.
+_MT_QUARTERLY_METRICS = ('revenue', 'earnings', 'margin', 'shares', 'eps')
 
 
-def _mt_chart_rows(ticker, series_type, statement, timeout=10):
-    """The parsed `var chartData` list for one annual Macrotrends series.
+def _mt_chart_rows(ticker, series_type, statement, timeout=10, freq='A'):
+    """The parsed `var chartData` list for one Macrotrends series.
+
+    `freq` is 'A' for annual columns or 'Q' for quarterly ones — the same
+    endpoint and the same response shape either way, which is why there is still
+    one scraper. `yb` bounds both: at 40 it reaches 157 quarters for Apple, back
+    to 1987, and Macrotrends truncates at its own coverage rather than padding.
 
     Raises on a transport or parse failure, and returns [] only when the page
     carries a genuinely empty series. The caller caches this, and caching a
@@ -254,7 +272,7 @@ def _mt_chart_rows(ticker, series_type, statement, timeout=10):
     r = req.get(
         _MT_URL,
         params={'t': base, 'type': series_type, 'statement': statement,
-                'freq': 'A', 'sub': '', 'yb': _MT_YEARS_BACK},
+                'freq': freq, 'sub': '', 'yb': _MT_YEARS_BACK},
         headers={'User-Agent': _MT_UA,
                  'Referer': f'https://www.macrotrends.net/stocks/charts/{base.lower()}/stock/{series_type}'},
         timeout=timeout,
@@ -266,23 +284,33 @@ def _mt_chart_rows(ticker, series_type, statement, timeout=10):
     return json.loads(match.group(1))
 
 
-def scrape_macrotrends(ticker, metric, timeout=10):
+def scrape_macrotrends(ticker, metric, timeout=10, freq='A'):
     """{'YYYY-MM-DD': value} in base units, for one key of `_MT_SERIES`.
 
     Keyed by period-end date rather than by year. Macrotrends dates a column the
     same way yfinance does — Walmart's fiscal 2025 is '2026-01-31' to both — so
-    the caller re-keys it with `_mt_years` under the same fiscal rule as the
-    series it is merging into. That is the only thing that makes the two line up.
+    the caller re-keys it with `_mt_years` (or `_mt_quarters`) under the same
+    rule as the series it is merging into. That is the only thing that makes the
+    two line up.
 
-    Reads **v2**. In a chartData row v1 is the PRIOR fiscal year's value and v2
-    belongs to the labelled `date`: v1 equals the previous row's v2, and v3 is
-    the change from v1 to v2. Reading v1 shifted every Macrotrends bar on the
-    FCF, margin and share-count charts back a year — Apple's 2020 free cash flow
-    read $58.90B, which is what it earned in 2019.
+    Reads **v2**, and v2 is the labelled period's own value at BOTH frequencies —
+    which is the only reason one parser serves both. The other two fields are not
+    stable across `freq`, so do not reach for them:
+
+      annual     v1 = the prior fiscal year, v3 = the change from v1 to v2
+      quarterly  v1 = the TRAILING TWELVE MONTHS, v3 = the change on the same
+                 quarter a year earlier
+
+    v1 was measured, not assumed: the sum of each row's trailing four v2 equals
+    its v1 to the last digit on every quarter checked. Reading v1 here on the
+    annual path shifted every scraped bar back a year once already — Apple's 2020
+    free cash flow read $58.90B, which is what it earned in 2019 — and the same
+    read on the quarterly path would put a TTM figure on a quarter's bar, roughly
+    four times too large and rising smoothly where the real series is seasonal.
     """
     spec = _MT_SERIES[metric]
     out  = {}
-    for row in _mt_chart_rows(ticker, spec.type, spec.statement, timeout):
+    for row in _mt_chart_rows(ticker, spec.type, spec.statement, timeout, freq=freq):
         date_str = str(row.get('date') or '')
         if len(date_str) < 10:
             continue
@@ -295,7 +323,45 @@ def scrape_macrotrends(ticker, metric, timeout=10):
         if spec.positive_only and value <= 0:
             continue
         out[date_str] = round(value, spec.places) if spec.places is not None else value
+    if freq == 'Q':
+        _mt_assert_quarterly(out, ticker, metric)
     return out
+
+
+def _mt_assert_quarterly(by_date, ticker, metric):
+    """Raise unless `by_date` really does step by quarters.
+
+    Asking this endpoint for a cash-flow-statement series by quarter does not
+    fail. `free-cash-flow` with freq=Q returns the **annual** payload byte for
+    byte — thirty-nine rows twelve months apart — and only `capital-expenditures`
+    has the decency to 404. Measured across ten tickers, that split is a property
+    of the statement, not of the company, which is why `_MT_QUARTERLY_METRICS`
+    simply does not ask for those two.
+
+    This is the backstop for the other five. The failure it exists to catch is
+    silent and total: forty annual bars relabelled Q1..Q4 draw a company that
+    grew for four decades without one down quarter, and every number on it is
+    real, so nothing downstream — not the merge gate, not the chart, not a
+    reader — has any way to notice. Raising also keeps it out of `_TtlCache`,
+    which caches returns and not exceptions, so a Macrotrends change that broke
+    one series would not pin it broken for six hours.
+    """
+    dates = sorted(by_date)
+    if len(dates) < 3:
+        # Too short to judge, and too short to chart. A genuine quarterly series
+        # is 31 rows for the youngest company checked.
+        raise ValueError(f'Macrotrends returned {len(dates)} quarterly rows for '
+                         f'{ticker} {metric}; expected a series')
+    gaps = []
+    for a, b in zip(dates, dates[1:]):
+        gaps.append((int(b[:4]) - int(a[:4])) * 12 + (int(b[5:7]) - int(a[5:7])))
+    gaps.sort()
+    median = gaps[len(gaps) // 2]
+    # Quarterly steps 3; annual steps 12. Five leaves room for a filer that skips
+    # or restates a period without admitting a twelve-month series.
+    if median > 5:
+        raise ValueError(f'Macrotrends served an annual series for {ticker} '
+                         f'{metric} under freq=Q ({median}-month median step)')
 
 
 def _mt_years(mt_by_date, fiscal=True):
@@ -312,6 +378,63 @@ def _mt_years(mt_by_date, fiscal=True):
             continue
         out[_fiscal_year(d) if fiscal else d.year] = value
     return out
+
+
+def _quarter_key(ts):
+    """The merge key for one quarterly column: 'YYYY-MM' of its period end.
+
+    The month and not the full date, deliberately. Both sources normalise a
+    quarter end to month end today — checked on COST, TGT, NKE, CSCO and DE,
+    every one a 52/53-week filer whose quarters genuinely end on a weekday, and
+    the two agree on all five to seven columns for each. Keying on the day would
+    stake the whole feature on that normalisation continuing to match on both
+    sides at once, and the failure if it ever stopped is silent rather than
+    loud: the overlap falls to zero, `_mt_check` sees no evidence either way and
+    drops every series, and the charts quietly shorten to five bars with nothing
+    on screen saying why. Nothing downstream wants the day.
+    """
+    return f'{ts.year:04d}-{ts.month:02d}'
+
+
+def _mt_quarters(mt_by_date):
+    """Re-key a quarterly `scrape_macrotrends` result from period-end date to
+    `_quarter_key`, so it lines up with the yfinance quarterly frame."""
+    out = {}
+    for date_str, value in (mt_by_date or {}).items():
+        try:
+            d = _date(int(date_str[:4]), int(date_str[5:7]), int(date_str[8:10]))
+        except (TypeError, ValueError):
+            continue
+        out[_quarter_key(d)] = value
+    return out
+
+
+def _fiscal_quarter(year, month, fye_month):
+    """(fiscal_year, quarter_number) for a period ending in `month` of `year`.
+
+    `fye_month` is the month the company's fiscal year ends, read off the annual
+    frame where every column shares it.
+
+    Not a reuse of `_fiscal_year`, and it cannot be one: that rule buckets a
+    whole year on a fixed April cut, which is right for an annual column and
+    wrong for three quarters in four of any non-calendar filer. Apple's FY2026
+    runs October 2025 to September 2026, so its December 2025 quarter is FY2026
+    Q1 — `_fiscal_year` calls that 2025 and would file it a year early, next to
+    a bar it precedes.
+    """
+    fy = year if month <= fye_month else year + 1
+    q  = ((month - fye_month - 1) % 12) // 3 + 1
+    return fy, q
+
+
+def _quarter_label(qkey, fye_month):
+    """A quarterly bar's axis label: "Q3 '26"."""
+    try:
+        year, month = int(qkey[:4]), int(qkey[5:7])
+    except (TypeError, ValueError):
+        return str(qkey)
+    fy, q = _fiscal_quarter(year, month, fye_month)
+    return f"Q{q} '{fy % 100:02d}"
 
 
 def _mt_check(mt_by_year, yf_by_year, spec, min_overlap=2, max_bad=None):
@@ -654,6 +777,12 @@ def crosslist():
                 'current':       False,
             })
 
+        # The switcher is a way to reach another listing, so a hidden one is
+        # dropped like any other offer. Filtered before the current listing is
+        # prepended: that row is the page you are already on, and /api/stock
+        # would have refused it if it were hidden.
+        listings = _drop_blocked(listings)
+
         # Add current listing first
         listings.insert(0, {
             'ticker':        tkkr,
@@ -745,7 +874,8 @@ def ticker_tape():
         if static:
             return jsonify({
                 'items': [{'ticker': s['ticker'], 'full_ticker': s['full_ticker'],
-                           'price': 0, 'change': 0, 'loading': True} for s in TAPE_STATIC],
+                           'price': 0, 'change': 0, 'loading': True}
+                          for s in _drop_blocked(TAPE_STATIC)],
                 'has_more': False, 'next_batch': 0, 'total_batches': 1,
             })
 
@@ -806,7 +936,11 @@ def ticker_tape():
             _tape_cache['data'] = sorted(items, key=lambda x: x['change'])
             _tape_cache['ts'] = time.time()
 
-        all_items = _tape_cache['data']
+        # Same rule as the movers cache above: _tape_cache is shared market data
+        # built once, and the hidden names are removed per reader. Before the
+        # batch arithmetic, so has_more and total_batches describe what this
+        # account will actually be sent.
+        all_items = _drop_blocked(_tape_cache['data'])
         total_batches = max(1, -(-len(all_items) // TAPE_BATCH_SIZE))
         start = batch * TAPE_BATCH_SIZE
         end   = start + TAPE_BATCH_SIZE
@@ -863,6 +997,7 @@ def canada_drops():
                 'mkt_cap': format_large_number(
                     q.get('marketCap'), _currency_symbol(q.get('currency'))),
             })
+        results = _drop_blocked(results)
         return jsonify({'results': results, 'count': len(results)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -968,7 +1103,11 @@ def movers():
     cache = _movers_cache[exchange]
     if not cache['gainers'] and not cache['losers'] or time.time() - cache['ts'] > MOVERS_TTL:
         _refresh_movers(exchange)
-    results = cache[direction][:limit]
+    # Hidden names come out here rather than in _refresh_movers: the cache is
+    # market data shared by every account, so it is built once and filtered per
+    # reader. Filtered before the slice, so hiding three names does not leave a
+    # 22-row "top 25".
+    results = _drop_blocked(cache[direction])[:limit]
     return jsonify({
         'results':   results,
         'count':     len(results),
@@ -1089,7 +1228,10 @@ def search_tickers():
                 'sector':   item.get('sector') or qtype.title(),
                 'exchange': item.get('exchDisp', ''),
             })
-        return jsonify(results)
+        # The typeahead is the one surface where a hidden name would otherwise
+        # be offered by the app itself. Typing the symbol in full still reaches
+        # /api/stock, which answers with the block rather than the page.
+        return jsonify(_drop_blocked(results))
     except Exception:
         return jsonify([])
 
@@ -1681,21 +1823,58 @@ def _do_get_stock(tkkr):
         # still bars any cross-currency ratio.
         same_currency = (currency or '').upper() == (financial_currency or '').upper()
 
-        # Override price with fast_info for real-time consistency with watchlist quotes
+        # Override price with fast_info for real-time consistency with watchlist
+        # quotes. The share count comes off the same object because `info` omits
+        # it for exactly the listings it omits `marketCap` for — see below.
+        fast_shares = None
         try:
             fi = ticker.fast_info
             fast_price = getattr(fi, 'last_price', None)
             if fast_price:
                 price = float(fast_price)
+            fast_shares = _finite(getattr(fi, 'shares', None))
         except Exception:
             pass
+
+        # One definition, read by everything below it. This expression used to be
+        # written out three separate times — the payout-ratio walk, the TTM
+        # earnings derivation and the payload — so a listing Yahoo reports no
+        # count for lost four unrelated figures at once and there was nowhere
+        # single to fix it.
+        shares_outstanding = (_finite(info.get('sharesOutstanding'))
+                              or _finite(info.get('impliedSharesOutstanding'))
+                              or fast_shares)
+
         sector   = info.get('sector') or info.get('industry') or 'N/A'
         exchange = info.get('exchange') or info.get('fullExchangeName') or 'N/A'
         pe_ratio     = info.get('trailingPE') or None
         forward_pe   = info.get('forwardPE')  or None
         week52_high  = info.get('fiftyTwoWeekHigh') or info.get('52WeekHigh') or None
         week52_low   = info.get('fiftyTwoWeekLow')  or info.get('52WeekLow')  or None
-        market_cap = format_large_number(info.get('marketCap') or info.get('regularMarketCap'), trade_sym)
+        # Both halves, per the raw/value rule. The valuation calculator compares
+        # its equity value against the cap directly rather than dividing by a
+        # share count, so the float has to survive the trip — parsing '$1.09T'
+        # back would quantise a mega-cap to three digits.
+        market_cap_raw = _finite(info.get('marketCap') or info.get('regularMarketCap'))
+        if market_cap_raw is None and shares_outstanding and price:
+            # Yahoo omits `marketCap` outright for a stable minority of listings —
+            # Home Depot and American Eagle among them — and omits
+            # `sharesOutstanding` with it, so nothing in `info` derives it and
+            # naming the field explicitly does not bring it back. The index tables
+            # already fill this the same way (`_index_backfill_caps`: fast_info's
+            # count times the live price, verified to reproduce Yahoo's own figure
+            # to a ratio of 1.0000 on the 116 sampled names reporting both). The
+            # detail page had no equivalent and printed 'N/A', which took the
+            # valuation panel's margin of safety down with it — MoS divides by the
+            # cap, so a missing one is a blank readout rather than a wrong number.
+            #
+            # A fallback and not the rule, because a share count is not always the
+            # count the cap is built from: BRK-B's covers the B class alone and
+            # lands 34% under the reported figure. That case cannot reach here —
+            # this only fires where Yahoo reports no cap at all, and there the
+            # alternative is nothing.
+            market_cap_raw = shares_outstanding * float(price)
+        market_cap = format_large_number(market_cap_raw, trade_sym)
         raw_debt   = info.get('totalDebt') or info.get('longTermDebt') or 0
         raw_cash   = info.get('totalCash') or info.get('cash') or 0
         net_debt   = raw_debt - raw_cash
@@ -1901,7 +2080,7 @@ def _do_get_stock(tkkr):
             divs2.index = divs2.index.tz_localize(None)
             annual_divs = divs2.groupby(divs2.index.year).sum()
 
-            shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding') or None
+            shares = shares_outstanding
 
             # Get total dividends paid from cashflow statement
             total_divs_by_year = {}
@@ -1977,41 +2156,71 @@ def _do_get_stock(tkkr):
             pass
 
         # --- Revenue by Year ---
+        # Built exactly like the earnings series below: annual columns first, the
+        # quarterly frame filling any year yfinance omits from the annual one, a
+        # TTM bar off the trailing four quarters, and Macrotrends behind all of
+        # it. The quarterly fallback sits outside the `Total Revenue in
+        # fin.index` test rather than nested inside it — a filer missing from the
+        # annual frame is exactly the one whose quarters have to answer.
         revenue_ttm_str = 'N/A'
         revenue_by_year = []
         try:
             fin = ticker.financials
+            yf_rev = {}
             if 'Total Revenue' in fin.index:
                 rev_row = fin.loc['Total Revenue']
+                # The fallback for the box, not the answer: this is the newest
+                # *annual* column. See the override below the quarterly block.
                 ttm_val = rev_row.iloc[0]
                 if ttm_val is not None and not pd.isna(ttm_val):
                     revenue_ttm_str = format_large_number(float(ttm_val), fin_sym)
-                yf_rev = {}
                 for date, val in sorted(rev_row.items()):
                     if val is not None and not pd.isna(val):
                         yr = date.year if date.month >= 4 else date.year - 1
                         yf_rev[yr] = float(val)
-                rev_ttm_entry = None
-                try:
-                    q_fin = ticker.quarterly_financials
-                    if 'Total Revenue' in q_fin.index:
-                        q_rev_row = q_fin.loc['Total Revenue']
-                        partial_yr, ttm_rev = _quarterly_ttm(q_rev_row)
-                        q_by_year = {}
-                        for date, val in q_rev_row.items():
-                            if val is not None and not pd.isna(val):
-                                yr = date.year if date.month >= 4 else date.year - 1
-                                q_by_year[yr] = q_by_year.get(yr, 0) + float(val)
-                        for yr, val in q_by_year.items():
-                            if yr not in yf_rev and yr != partial_yr:
-                                yf_rev[yr] = val
-                        if ttm_rev is not None and partial_yr not in yf_rev:
-                            rev_ttm_entry = {'year': 'TTM', 'raw': ttm_rev, 'value': format_large_number(ttm_rev, fin_sym)}
-                except Exception:
-                    pass
-                revenue_by_year = [{'year': yr, 'raw': v, 'value': format_large_number(v, fin_sym)} for yr, v in sorted(yf_rev.items())]
-                if rev_ttm_entry:
-                    revenue_by_year.append(rev_ttm_entry)
+            rev_ttm_entry = None
+            ttm_rev = None
+            try:
+                q_fin = ticker.quarterly_financials
+                if 'Total Revenue' in q_fin.index:
+                    q_rev_row = q_fin.loc['Total Revenue']
+                    partial_yr, ttm_rev = _quarterly_ttm(q_rev_row)
+                    q_by_year = {}
+                    for date, val in q_rev_row.items():
+                        if val is not None and not pd.isna(val):
+                            yr = date.year if date.month >= 4 else date.year - 1
+                            q_by_year[yr] = q_by_year.get(yr, 0) + float(val)
+                    for yr, val in q_by_year.items():
+                        if yr not in yf_rev and yr != partial_yr:
+                            yf_rev[yr] = val
+                    if ttm_rev is not None and partial_yr not in yf_rev:
+                        rev_ttm_entry = {'year': 'TTM', 'raw': ttm_rev,
+                                         'value': format_large_number(ttm_rev, fin_sym), 'src': 'yf'}
+            except Exception:
+                pass
+            # The box is labelled "Revenue (TTM)" and was showing the newest
+            # annual column, which is a fiscal year and not a trailing twelve
+            # months — Apple read $416.16B against a real $466.82B. Nothing on
+            # the page contradicted it while the by-year chart was a popup; the
+            # chart is a section now and prints its own TTM bar directly below,
+            # so the two would have disagreed in plain sight.
+            #
+            # `_quarterly_ttm` sums the four most recent quarters and returns
+            # None rather than a short sum when it has fewer, so the annual
+            # column stays the fallback for a filer yfinance gives no quarters
+            # for — a stale-by-one-quarter figure beats a blank card.
+            if ttm_rev is not None:
+                revenue_ttm_str = format_large_number(ttm_rev, fin_sym)
+            # yfinance reaches back five years; Macrotrends carries the rest, and
+            # a scraped year only ever fills a gap.
+            yf_rev, rev_src, _ = _merge_macrotrends(
+                yf_rev, _mt_years(_mt_result(mt, 'revenue')), 'revenue')
+            revenue_by_year = [{'year': yr, 'raw': v, 'value': format_large_number(v, fin_sym),
+                                'src': rev_src[yr]} for yr, v in sorted(yf_rev.items())]
+            if rev_ttm_entry:
+                # Appended after the sort: 'TTM' is a string and won't order
+                # against the int years.
+                revenue_by_year.append(rev_ttm_entry)
         except Exception:
             pass
 
@@ -2171,7 +2380,7 @@ def _do_get_stock(tkkr):
         # the EPS card and P/E ratio (both sourced from the same Yahoo Finance fields).
         # Also recalculate profit margin so it uses the same earnings basis.
         try:
-            _shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding')
+            _shares = shares_outstanding
             if eps_raw is not None and _shares is not None:
                 # trailingEps is per *traded* share, so this lands in the
                 # listing's currency — USD per ADR for TSM, not the TWD its
@@ -2190,9 +2399,6 @@ def _do_get_stock(tkkr):
                     profit_margin_str = f"{(earnings_ttm_raw / float(_rev)) * 100:.2f}%"
         except Exception:
             pass
-
-        # Shares outstanding (for calculator hint)
-        shares_outstanding = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding') or None
 
         # --- Earnings hit/miss history ---
         # Newest first. yfinance's Surprise(%) is already a percent (-10.88 means
@@ -2280,7 +2486,15 @@ def _do_get_stock(tkkr):
             'currency_symbol': trade_sym,
             'financial_currency_symbol': fin_sym,
             'same_currency': same_currency,
+            # Which month this filer's fiscal year ends in, so the forward
+            # guidance panel can say what calendar span an `FY2027` covers.
+            # Free here: `financials` is in `_PREFETCH_PROPS` and yfinance
+            # memoises it per Ticker, so this is a warm attribute read.
+            # None when the frame does not say — the panel then shows the
+            # fiscal label alone, which is what it did before this existed.
+            'fiscal_year_end_month': _fye_month_opt(_frame(ticker, 'financials')),
             'market_cap': market_cap,
+            'market_cap_raw': market_cap_raw,
             'sector': sector,
             'exchange': exchange,
             'pe_ratio': f"{pe_ratio:.2f}" if pe_ratio else 'N/A',
@@ -2336,6 +2550,16 @@ def _do_get_stock(tkkr):
 # ---------------------------------------------------------------------------
 STOCK_TTL = 600
 
+# Past STOCK_TTL a payload is stale but still servable; past this it is not.
+# The gap between the two is the stale-while-revalidate window — see
+# _cached_stock. An hour is chosen against what actually moves in this payload:
+# fundamentals are quarterly, the statement frames and Macrotrends series change
+# on a filing, and the one field that moves by the minute is the quote, which
+# `_refresh_quote` re-fetches on the way out regardless of the entry's age. So a
+# 40-minute-old body with a live quote on it is not a worse answer than a fresh
+# one — it is the same answer, three seconds sooner.
+STOCK_STALE_TTL = 3600
+
 _stock_cache: dict = {}          # ticker -> {'data': dict, 'ts': float}
 _stock_cache_lock = threading.RLock()
 _stock_inflight: dict = {}       # ticker -> Event, so concurrent hits share one fetch
@@ -2347,20 +2571,72 @@ def _refresh_quote(data):
     Keeps the exact shape _do_get_stock produces — `price` is a 2dp string and
     `day_change_pct` a rounded float — so a refreshed payload is indistinguishable
     from a fresh one to the frontend.
+
+    Market cap rides along, rescaled by the same ratio. It is price x shares by
+    definition and the share count does not move intraday, so this is exact — and
+    it has to happen, because the valuation calculator now compares an equity
+    value against the cap while showing the price beside it. An entry is servable
+    for STOCK_STALE_TTL (an hour), so leaving the cap behind would put a live
+    price next to an hour-old cap and quietly bias every margin of safety by
+    whatever the stock did in between.
     """
     try:
         fi   = yf.Ticker(data['ticker']).fast_info
         last = getattr(fi, 'last_price', None)
         prev = getattr(fi, 'previous_close', None)
         if last:
+            prior = _finite(data.get('price'))
             data = dict(data)
             data['price'] = f'{float(last):.2f}'
             if prev and float(prev):
                 data['day_change_pct'] = round(
                     (float(last) - float(prev)) / float(prev) * 100, 2)
+            cap = _finite(data.get('market_cap_raw'))
+            if cap is not None and prior:
+                cap = cap * (float(last) / prior)
+                data['market_cap_raw'] = cap
+                data['market_cap'] = format_large_number(
+                    cap, data.get('currency_symbol') or '$')
     except Exception:
         pass
     return data
+
+
+def _refresh_stock_async(tkkr):
+    """Rebuild a stale cache entry in the background. No-op if one is running.
+
+    Registration happens under the same lock that reads `_stock_inflight`, so two
+    stale hits arriving together start one rebuild rather than two, and a
+    genuinely cold request for the same ticker waits on this one instead of
+    racing it — the same coalescing `_cached_stock` already does for cold
+    fetches, reused rather than reimplemented.
+    """
+    import time as _time
+
+    with _stock_cache_lock:
+        if tkkr in _stock_inflight:
+            return
+        waiting = threading.Event()
+        _stock_inflight[tkkr] = waiting
+
+    def _work():
+        try:
+            data = _do_get_stock(tkkr)
+            with _stock_cache_lock:
+                _stock_cache[tkkr] = {'data': data, 'ts': _time.time()}
+        except Exception as e:
+            # The stale entry stays. It is still servable, and dropping it would
+            # turn one transient upstream failure into a cold fetch for whoever
+            # asks next — the exact cost this path exists to avoid. It ages out
+            # through STOCK_STALE_TTL on its own if the failure is not transient.
+            print(f'[STOCK] background refresh failed for {tkkr}: '
+                  f'{type(e).__name__}: {e}', flush=True)
+        finally:
+            with _stock_cache_lock:
+                _stock_inflight.pop(tkkr, None)
+            waiting.set()
+
+    threading.Thread(target=_work, daemon=True).start()
 
 
 def _cached_stock(tkkr):
@@ -2370,7 +2646,17 @@ def _cached_stock(tkkr):
 
     with _stock_cache_lock:
         hit = _stock_cache.get(tkkr)
-        if hit and now - hit['ts'] < STOCK_TTL:
+        age = (now - hit['ts']) if hit else None
+        if hit and age < STOCK_TTL:
+            return hit['data'], True
+        # Stale but inside the SWR window: answer from it now and rebuild
+        # behind the response. Expiry used to be a cliff — the first request
+        # after ten minutes paid the full cold cost (five Macrotrends scrapes
+        # plus a whole yfinance walk, ~3s) on behalf of everyone after it, and
+        # the more popular a ticker was the more reliably some unlucky caller
+        # hit that edge. Nobody waits for a rebuild now.
+        if hit and age < STOCK_STALE_TTL:
+            _refresh_stock_async(tkkr)
             return hit['data'], True
         # Another request is already fetching this ticker: wait for it rather
         # than starting a second identical set of upstream calls.
@@ -2407,6 +2693,16 @@ def get_stock():
     tkkr = clean_ticker(request.args.get('ticker'))
     if not tkkr:
         return jsonify({'error': 'No valid ticker provided'}), 400
+
+    # Here in the route rather than in _do_get_stock: the payload cache below is
+    # keyed by ticker and shared by every account, so the account-specific
+    # question has to be asked before it is consulted. Refused rather than
+    # served, because the detail page is the one place a hidden symbol can still
+    # be reached — the filters elsewhere only stop the app from offering it, and
+    # a ticker typed in full would otherwise walk straight past all of them.
+    if tkkr in _blocked_set():
+        return jsonify({'error': f'{tkkr} is hidden.',
+                        'blocked': True, 'ticker': tkkr}), 403
 
     result  = [None]
     cached  = [False]
@@ -2447,6 +2743,11 @@ def get_news():
     tkkr = clean_ticker(request.args.get('ticker'))
     name = request.args.get('name', '').strip()
     if not tkkr:
+        return jsonify({'news': []})
+    # Fires in parallel with /api/stock, so it has to refuse independently —
+    # otherwise hiding a stock still spends the account's API key scraping and
+    # rewriting ten articles about it every time the symbol is searched.
+    if tkkr in _blocked_set():
         return jsonify({'news': []})
 
     with _news_cache_lock:
@@ -2949,6 +3250,121 @@ def _handle_store_error(e):
     return jsonify({'error': str(e)}), 500
 
 
+# ---------------------------------------------------------------------------
+# Hidden stocks
+#
+# A block is a *discovery* filter, and that boundary is the whole design. Every
+# route that offers a stock you did not ask for by name drops a hidden symbol on
+# the way out — the tape, the movers strip, the market browser, the typeahead,
+# the Canadian screener, the positions news feed, the exchange switcher, the
+# watchlist — and /api/stock refuses the detail page outright, so searching a
+# hidden symbol says so rather than quietly serving it.
+#
+# What it deliberately does not touch is the ledger. Holdings, transactions,
+# sales, options and every figure derived from them are one arithmetic record:
+# `realized + unrealized + dividends + option P/L == (cash_pool + market value)
+# − invested` holds to a penny, and it holds because nothing filters those
+# walks. Dropping a hidden position from `_compute_invested()` would not hide a
+# stock — it would silently misreport the portfolio's return, which is the
+# failure mode here that looks most like working code. So a hidden holding keeps
+# counting, and POST /api/blocked reports `held` so the UI can say so out loud
+# instead of leaving the user to notice.
+#
+# Nothing is deleted. A block hides rows; unblocking brings back the watchlist
+# entry, the valuation and the notes exactly as they were. That is what makes
+# this safe to reach for — the alternative, deleting on block, turns a change of
+# mind into lost work.
+#
+# Matching is exact, on the full symbol. A root rule (block SHOP, hide SHOP.TO)
+# reads as helpful right up until NA.TO takes NA with it; every store here is
+# keyed by the full symbol, and a filter that hides more than it was asked to is
+# indistinguishable from a bug.
+# ---------------------------------------------------------------------------
+
+BLOCKED_FILE = _register_user_file('blocked.json', list)
+
+def load_blocked(owner=None):
+    return _user_store(BLOCKED_FILE, owner).load()
+
+def save_blocked(items, owner=None):
+    _user_store(BLOCKED_FILE, owner).save(items)
+    return True
+
+
+def _blocked_set(owner=None):
+    """This account's hidden symbols, as a set.
+
+    Empty rather than raising when there is no session: the movers, tape and
+    index caches are built on background threads and are shared across accounts
+    anyway, so a builder with no owner has nothing to hide. The filtering
+    happens per request, on the way out of the route that serves those caches —
+    one shared payload, filtered differently for each reader.
+    """
+    try:
+        rows = load_blocked(owner)
+    except RuntimeError:
+        return frozenset()
+    return frozenset(t for t in (clean_ticker(r.get('ticker')) for r in rows) if t)
+
+
+def _row_symbol(row):
+    """The symbol a discovery row is identified by.
+
+    `full_ticker` first because `ticker` is the display spelling on the movers
+    and index rows — 'SHOP' for SHOP.TO — and matching that would hide a
+    different company's listing on a different venue.
+    """
+    return (row.get('full_ticker') or row.get('ticker') or '').strip().upper()
+
+
+def _drop_blocked(rows, owner=None):
+    """`rows` minus anything this account has hidden."""
+    hidden = _blocked_set(owner)
+    if not hidden:
+        return list(rows)
+    return [r for r in rows if _row_symbol(r) not in hidden]
+
+
+@app.route('/api/blocked', methods=['GET'])
+def get_blocked():
+    return jsonify({'items': load_blocked()})
+
+
+@app.route('/api/blocked', methods=['POST'])
+@atomic
+def add_blocked():
+    data   = request.json or {}
+    ticker = clean_ticker(data.get('ticker'))
+    if not ticker:
+        return jsonify({'error': 'Invalid ticker'}), 400
+
+    items = load_blocked()
+    if not any(i.get('ticker') == ticker for i in items):
+        items.append({
+            'ticker':  ticker,
+            'name':    str(data.get('name') or '')[:120],
+            'blocked': _now_iso(),
+        })
+        save_blocked(items)
+
+    # Said out loud rather than left to be discovered. Hiding a stock does not
+    # unwind a position in it, and a Holdings tab still listing something you
+    # just hid reads as the block having failed.
+    held = any(h.get('ticker') == ticker for h in load_holdings())
+    return jsonify({'items': items, 'held': held})
+
+
+@app.route('/api/blocked/<ticker>', methods=['DELETE'])
+@atomic
+def remove_blocked(ticker):
+    # Delete-by-ticker only filters this account's own file, so a raw compare is
+    # fine here — the same rule the watchlist and valuations deletes follow.
+    want  = (ticker or '').strip().upper()
+    items = [i for i in load_blocked() if i.get('ticker') != want]
+    save_blocked(items)
+    return jsonify({'items': items})
+
+
 WATCHLIST_FILE = _register_user_file('watchlist.json', list)
 
 def load_watchlist(owner=None):
@@ -2960,7 +3376,9 @@ def save_watchlist(items, owner=None):
 
 @app.route('/api/watchlist', methods=['GET'])
 def get_watchlist():
-    return jsonify(load_watchlist())
+    # Filtered, not pruned: the stored row survives a block untouched, so
+    # unhiding puts the entry back with the name and date it was added under.
+    return jsonify(_drop_blocked(load_watchlist()))
 
 @app.route('/api/watchlist', methods=['POST'])
 @atomic
@@ -2972,6 +3390,12 @@ def add_to_watchlist():
     ticker = clean_ticker(data.get('ticker'))
     if not ticker:
         return jsonify({'error': 'Invalid ticker'}), 400
+    # Unreachable from the UI — the stock page a watch is added from already
+    # refuses a hidden symbol — but a route that accepts a write the GET then
+    # filters out is an Add button that silently does nothing.
+    if ticker in _blocked_set():
+        return jsonify({'error': f'{ticker} is hidden. Unhide it first.',
+                        'blocked': True}), 409
     items = load_watchlist()
     if not any(i['ticker'] == ticker for i in items):
         items.append({
@@ -3103,10 +3527,290 @@ _splits_cache     = _TtlCache(CORP_ACTIONS_TTL)
 _mt_cache = _TtlCache(CORP_ACTIONS_TTL)
 
 
-def _mt_cached(tkkr, metric):
-    """`scrape_macrotrends` behind the shared TTL cache."""
-    return _mt_cache.get((tkkr.split('.')[0].upper(), metric),
-                         lambda k: scrape_macrotrends(k[0], k[1]))
+def _mt_cached(tkkr, metric, freq='A'):
+    """`scrape_macrotrends` behind the shared TTL cache.
+
+    `freq` is part of the key. The annual and quarterly series for one metric are
+    different data under the same name, so sharing a key would serve whichever
+    frequency happened to be asked for first — and since the annual lookup runs
+    on every stock page and the quarterly one only on a toggle, that would
+    reliably be the annual one.
+    """
+    return _mt_cache.get((tkkr.split('.')[0].upper(), metric, freq),
+                         lambda k: scrape_macrotrends(k[0], k[1], freq=k[2]))
+
+
+# ---------------------------------------------------------------------------
+# Quarterly view
+#
+# `_do_get_stock` builds the annual charts and stays the load path. This builds
+# the same five income-statement series by quarter — up to 157 of them, back to
+# 1987 for Apple — plus FCF and capex, which have no quarterly page anywhere and
+# so get yfinance's five or six columns and a caption saying why.
+#
+# A second route rather than five more scrapes on `/api/stock`, because only the
+# toggle wants this. A lookup that never flips it pays nothing; the first flip
+# per ticker costs one round trip and every flip after that is free on both
+# sides. Same argument the account prefetch makes about the load path: what
+# everybody waits for should not carry what only some people use.
+#
+# The merge gate is reused rather than reimplemented. `_merge_macrotrends` and
+# `_mt_check` never look at what a key *means* — they intersect, sort and
+# compare — so quarter keys pass through the same take-or-drop-whole rule the
+# annual series go through, with the same tolerances and the same logging.
+# ---------------------------------------------------------------------------
+
+# Quarterly fundamentals change on a filing, so this rides the same six hours as
+# the scrapes behind it. `_mt_cache` already holds the expensive half; this saves
+# re-walking four yfinance frames and re-running five merges on every toggle.
+_quarterly_cache = _TtlCache(CORP_ACTIONS_TTL)
+
+# Narrower than `_PREFETCH_PROPS`: this payload reads four frames and `info`, and
+# has no use for dividends, earnings dates or the two estimate frames.
+_Q_PREFETCH_PROPS = ('info', 'financials', 'quarterly_financials',
+                     'quarterly_cashflow', 'quarterly_balance_sheet')
+
+# Why the two cash-flow series are short. Shown under those charts only, because
+# a five-bar chart beside a 157-bar one otherwise reads as a data failure.
+_Q_CASHFLOW_NOTE = ('Yahoo Finance reports five to six quarters. Macrotrends '
+                    'publishes no quarterly cash-flow statement, so there is '
+                    'nothing deeper to merge in.')
+
+
+def _frame(ticker, name):
+    """One yfinance frame, or None if it failed. Warmed by the prefetch above."""
+    try:
+        df = getattr(ticker, name)
+        return None if df is None or getattr(df, 'empty', True) else df
+    except Exception:
+        return None
+
+
+def _fye_month_opt(fin):
+    """The month a filer's fiscal year ends, or None when the frame can't say.
+
+    Every annual column shares it, so the newest one answers. The one parse
+    site; `_fye_month` is this with a December default laid over it.
+
+    The distinction is not pedantry. `_quarter_label` only ever puts the month
+    in a *label*, so guessing December there is wrong in a caption and nowhere
+    else. The forward-guidance panel dates a fiscal period against it — turn
+    "unknown" into December for an offset filer there and `FY2027` is captioned
+    `Jan – Dec 2027` when it means Jul 2026 – Jun 2027, which is a whole year
+    wrong and reads exactly like a figure that was looked up. That consumer
+    takes this one and shows no span rather than a guessed one.
+    """
+    try:
+        cols = sorted(fin.columns)
+        if cols:
+            return int(pd.Timestamp(cols[-1]).month)
+    except Exception:
+        pass
+    return None
+
+
+def _fye_month(fin):
+    """The month a filer's fiscal year ends, defaulting to December.
+
+    Right for the large majority, and wrong only in a label rather than in a
+    value, since `_quarter_label` is the sole consumer. Anything that computes
+    a *date* from this wants `_fye_month_opt`.
+    """
+    fye = _fye_month_opt(fin)
+    return 12 if fye is None else fye
+
+
+def _q_row_map(row):
+    """{quarter key: float} from one row of a yfinance quarterly frame."""
+    out = {}
+    if row is None:
+        return out
+    for ts, val in row.items():
+        v = _finite(val)
+        if v is not None:
+            out[_quarter_key(pd.Timestamp(ts))] = float(v)
+    return out
+
+
+def _q_rows(merged, src, fye, fmt, extra_key=None):
+    """A merged {quarter key: value} dict as ordered chart rows, oldest first.
+
+    Carries `period` (the merge key) and `label` (the fiscal quarter) rather than
+    the annual shape's `year`, so nothing downstream can mistake one shape for
+    the other. The frontend reads `label ?? year` and draws either.
+
+    Sorting on the key works because `_quarter_key` is zero-padded 'YYYY-MM', so
+    lexicographic order is chronological — the same property `_new_txn_id` relies
+    on, and the same reason neither needs parsing to order correctly.
+    """
+    rows = []
+    for qk in sorted(merged):
+        v = merged[qk]
+        if v is None:
+            continue
+        row = {'period': qk, 'label': _quarter_label(qk, fye),
+               'raw': v, 'value': fmt(v), 'src': src.get(qk, 'yf')}
+        if extra_key:
+            # The annual margin chart reads `margin`, not `raw`. Carrying both
+            # lets one frontend code path draw either frequency.
+            row[extra_key] = v
+        rows.append(row)
+    return rows
+
+
+def _fetch_quarterly(tkkr):
+    """Every quarterly series for one ticker. Raises if the lookup itself failed.
+
+    Behind `_TtlCache`, so the distinction `_fetch_div_events` draws applies
+    here too: a transport failure has to raise rather than return an empty
+    payload, or one bad moment pins every quarterly chart empty for six hours.
+    A series that is legitimately absent — FCF on a filer yfinance has no
+    cash-flow frame for — is a real answer inside a payload that built, and is
+    cached with the rest.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    ticker = yf.Ticker(tkkr)
+
+    # Submitted before the yfinance prefetch so the scrapes overlap it and each
+    # other — the ordering `_do_get_stock` uses, for the same reason. The budget
+    # in `_MtScrapes` starts here, at submission, not at the first read.
+    mt = _MtScrapes({})
+    if '.' not in tkkr:
+        ex = ThreadPoolExecutor(max_workers=len(_MT_QUARTERLY_METRICS))
+        try:
+            mt = _MtScrapes({m: ex.submit(_mt_cached, tkkr, m, 'Q')
+                             for m in _MT_QUARTERLY_METRICS})
+        finally:
+            ex.shutdown(wait=False)
+
+    def _touch(prop):
+        try:
+            getattr(ticker, prop)
+        except Exception:
+            pass
+
+    with ThreadPoolExecutor(max_workers=len(_Q_PREFETCH_PROPS)) as pex:
+        list(pex.map(_touch, _Q_PREFETCH_PROPS))
+
+    info = ticker.info or {}
+    if not info or len(info) < 5:
+        raise ValueError(f"Could not retrieve data for '{tkkr}'. Check the symbol.")
+
+    # Statement figures follow the filing currency, never the listing's — the
+    # split every money figure on the stock page already observes.
+    fin_sym = _currency_symbol(info.get('financialCurrency') or info.get('currency') or 'USD')
+
+    q_fin = _frame(ticker, 'quarterly_financials')
+    q_cf  = _frame(ticker, 'quarterly_cashflow')
+    q_bs  = _frame(ticker, 'quarterly_balance_sheet')
+    fye   = _fye_month(_frame(ticker, 'financials'))
+
+    money  = lambda v: format_large_number(v, fin_sym)
+    eps_fm = lambda v: ('-' if v < 0 else '') + fin_sym + _eps_str(abs(v))
+
+    yf_rev = _q_row_map(_df_row(q_fin, 'Total Revenue'))
+    yf_ni  = _q_row_map(_df_row(q_fin, 'Net Income', 'Net Income Common Stockholders'))
+
+    out = {'ticker': tkkr, 'fiscal_year_end_month': fye,
+           'financial_currency': info.get('financialCurrency') or info.get('currency') or 'USD',
+           'notes': {}}
+
+    # --- Revenue / net income -------------------------------------------------
+    rev_m, rev_s, _ = _merge_macrotrends(yf_rev, _mt_quarters(_mt_result(mt, 'revenue')), 'revenue')
+    out['revenue_by_q'] = _q_rows(rev_m, rev_s, fye, money)
+
+    ni_m, ni_s, _ = _merge_macrotrends(yf_ni, _mt_quarters(_mt_result(mt, 'earnings')), 'earnings')
+    out['earnings_by_q'] = _q_rows(ni_m, ni_s, fye, money)
+
+    # --- Net profit margin ----------------------------------------------------
+    # Computed per quarter from that quarter's own two rows, never by pairing a
+    # quarter's earnings with a trailing revenue — the balance-sheet rule in a
+    # different place.
+    yf_pm = {}
+    for qk, ni in yf_ni.items():
+        rev = yf_rev.get(qk)
+        if rev:
+            yf_pm[qk] = round(ni / rev * 100, 2)
+    pm_m, pm_s, _ = _merge_macrotrends(yf_pm, _mt_quarters(_mt_result(mt, 'margin')), 'margin')
+    out['margin_by_q'] = _q_rows(pm_m, pm_s, fye, lambda v: f'{v:.2f}%', extra_key='margin')
+
+    # --- EPS ------------------------------------------------------------------
+    yf_eps = _q_row_map(_df_row(q_fin, 'Diluted EPS', 'Basic EPS'))
+    eps_reported = bool(yf_eps)
+    if not yf_eps:
+        sh = _q_row_map(_df_row(q_fin, 'Diluted Average Shares', 'Basic Average Shares'))
+        for qk, ni in yf_ni.items():
+            if sh.get(qk):
+                yf_eps[qk] = ni / sh[qk]
+    # Same widening as the annual path: a derived EPS sits several percent off
+    # Macrotrends' as-reported diluted figure without either being wrong, so the
+    # gate only tightens when yfinance handed us the reported row.
+    eps_m, eps_s, _ = _merge_macrotrends(
+        yf_eps, _mt_quarters(_mt_result(mt, 'eps')), 'eps',
+        tol_rel=None if eps_reported else 0.15)
+    out['eps_by_q'] = _q_rows(eps_m, eps_s, fye, eps_fm)
+
+    # --- Share count ----------------------------------------------------------
+    # `min_overlap=0` matches `_build_shares_history`: Macrotrends' share history
+    # routinely starts where yfinance's balance sheet stops, leaving nothing to
+    # agree on, and `_MT_SHARES_MIN` is the gate that actually applies.
+    yf_sh = {k: v for k, v in _q_row_map(_df_row(q_bs, 'Ordinary Shares Number', 'Share Issued')).items() if v > 0}
+    mt_sh = {k: float(v) for k, v in _mt_quarters(_mt_result(mt, 'shares')).items() if v and v > 0}
+    sh_m, sh_s, _ = _merge_macrotrends(yf_sh, mt_sh, 'shares', min_overlap=0)
+    out['shares_by_q'] = _q_rows(sh_m, sh_s, fye, _fmt_count)
+
+    # --- Free cash flow / capex ----------------------------------------------
+    # yfinance alone. Nothing to merge and nothing to gate, so these skip
+    # `_merge_macrotrends` entirely rather than calling it with an empty dict.
+    yf_fcf = _q_row_map(_df_row(q_cf, 'Free Cash Flow'))
+    out['fcf_by_q'] = _q_rows(yf_fcf, {}, fye, money)
+
+    yf_capex = {k: abs(v) for k, v in
+                _q_row_map(_df_row(q_cf, 'Capital Expenditure', 'Capital Expenditures')).items()}
+    out['capex_by_q'] = _q_rows(yf_capex, {}, fye, money)
+
+    if out['fcf_by_q']:
+        out['notes']['fcf'] = _Q_CASHFLOW_NOTE
+    if out['capex_by_q']:
+        out['notes']['capex'] = _Q_CASHFLOW_NOTE
+
+    return out
+
+
+@app.route('/api/stock/quarterly', methods=['GET'])
+def get_stock_quarterly():
+    """The quarterly twin of `/api/stock`, fetched when the toggle is first flipped."""
+    import threading as _threading
+
+    tkkr = clean_ticker(request.args.get('ticker'))
+    if not tkkr:
+        return jsonify({'error': 'No valid ticker provided'}), 400
+
+    # Refused independently rather than leaning on `/api/stock` having already
+    # refused: this route is reachable on its own, and the cache below is shared
+    # by every account, so the account-specific question comes first.
+    if tkkr in _blocked_set():
+        return jsonify({'error': f'{tkkr} is hidden.',
+                        'blocked': True, 'ticker': tkkr}), 403
+
+    result, exc = [None], [None]
+    done = _threading.Event()
+
+    def _run():
+        try:
+            result[0] = _quarterly_cache.get(tkkr, _fetch_quarterly)
+        except Exception as e:
+            exc[0] = e
+        finally:
+            done.set()
+
+    _threading.Thread(target=_run, daemon=True).start()
+    if not done.wait(timeout=25):
+        return jsonify({'error': 'Request timed out — try again.'}), 504
+    if exc[0]:
+        return jsonify({'error': str(exc[0])}), 500
+    return jsonify(result[0])
 
 
 def _fetch_div_events(tkr):
@@ -4694,7 +5398,7 @@ def delete_option(option_id):
 # ---------------------------------------------------------------------------
 _SETTINGS_PATH = os.path.join(_DATA_DIR, 'settings.json')
 _SETTINGS_KEYS = ('ANTHROPIC_API_KEY', 'FRED_API_KEY', 'GROQ_API_KEY',
-                  'DEEPSEEK_API_KEY')
+                  'DEEPSEEK_API_KEY', 'ALPHAVANTAGE_API_KEY')
 
 # API keys are per account: each person pastes their own, and nobody's call is
 # billed to somebody else's key. So this is a per-user file like the portfolio
@@ -4730,6 +5434,37 @@ def _resolve_api_key(name, owner=None):
         return str((_load_settings(owner) or {}).get(name, '') or '').strip()
     except Exception:
         return ''
+
+
+def _account_env(owner: str) -> dict:
+    """The environment for a subprocess run on `owner`'s behalf: this account's
+    keys and no others.
+
+    Used by both launchers — `_run_report` and `_run_guidance` — because the
+    rule is a property of the keys, not of either feature. Every name in
+    `_SETTINGS_KEYS` is set unconditionally, and set to `''` rather than left
+    out when the account has none. Both halves matter.
+
+    Unconditionally, because `if name not in env` lets an `ANTHROPIC_API_KEY`
+    exported in the shell that started the server beat the account's own — one
+    key billed to everybody, which is the thing per-user keys exist to prevent.
+    `_run_report` had exactly that shape and was the weaker of the two.
+
+    Present-but-empty rather than absent, because Forward Guide loads a `.env`
+    beside itself and skips any key already in the environment: an empty one
+    reads as "none configured", where an absent one falls through to that file
+    and spends a shared key for an account that configured nothing.
+
+    Everything outside `_SETTINGS_KEYS` is inherited untouched. That is what
+    `STOCKBOX_THESES` and `MAX_FILING_CHARS` need — they configure a run rather
+    than pay for one, so they are nobody's credential to leak.
+    """
+    env = os.environ.copy()
+    env['PYTHONIOENCODING'] = 'utf-8'
+    cfg = _load_settings(owner) or {}
+    for name in _SETTINGS_KEYS:
+        env[name] = str(cfg.get(name, '') or '').strip()
+    return env
 
 
 # The /api/settings routes live in the administration block below only because
@@ -5199,10 +5934,20 @@ _RATE_LIMITS = {
     # a rate limit alone still lets a handful of them stack up, because the cost
     # is in how long each one lives, not in how often it is asked for.
     'generate_report':       (3,  2),
+    # EDGAR, an LLM extraction and a yfinance walk in a subprocess, on the
+    # account's own key. Priced like a report and bounded the same way, by
+    # GUIDANCE_MAX_CONCURRENT — the status route stays on the default bucket,
+    # since it is polled for the life of the run exactly as report-status is.
+    'forward_guidance_run':  (3,  2),
 
     # Third-party work per request. Held below what the upstream would notice:
     # being rate-limited by Yahoo degrades every other tab, not just this one.
     'get_stock':            (15, 30),
+    # Five Macrotrends scrapes and four yfinance frames, so it is priced like
+    # get_stock rather than like a quote. Lower burst: a page load fires one
+    # get_stock, but only a deliberate toggle fires this, and never more than
+    # once per ticker — the browser memo and `_quarterly_cache` absorb the rest.
+    'get_stock_quarterly':  (10, 20),
     'get_chart':            (20, 40),
     'crosslist':            (20, 40),
     'insider_buying':       (10, 20),
@@ -5212,6 +5957,10 @@ _RATE_LIMITS = {
     'search_tickers':       (30, 90),   # typeahead, debounced at 200ms
     'single_quote':         (30, 60),
     'batch_quotes':         (30, 60),
+    # A cold S&P 500 is a Wikipedia scrape plus five Yahoo quote batches, and
+    # the answer is shared — every account browsing the same index inside
+    # INDEX_QUOTES_TTL is served from one build.
+    'market_index':         (10, 20),
 
     # Spends an API key — the account's own, but still money.
     'get_news':              (8, 15),
@@ -5355,6 +6104,57 @@ def _rate_limited(wait):
         resp.mimetype = 'text/plain'
     resp.status_code = 429
     resp.headers['Retry-After'] = str(wait)
+    return resp
+
+
+import gzip as _gzip
+
+# Compression is not a general nicety here; it is what keeps "the whole universe
+# in one response" affordable. A 3,402-row Nasdaq payload is ~876KB of JSON and
+# ~171KB gzipped — 5.1x, because the body is overwhelmingly repeated key names
+# and digits. Flask does not do this on its own and the loopback default has no
+# proxy in front of it to do it instead, so without this the design that makes
+# sorting and filtering free would simply move the cost onto the wire.
+#
+# Registered *before* _issue_device_cookie so that it runs *after* it: Flask
+# calls after_request handlers in reverse registration order, and the one that
+# rewrites the body has to see the final body.
+_COMPRESS_MIN_BYTES = 1024
+_COMPRESSIBLE_TYPES = ('application/json', 'text/', 'application/javascript',
+                       'image/svg+xml')
+
+
+@app.after_request
+def _compress_response(resp):
+    """gzip a sizable text body when the client said it would take one."""
+    ctype = (resp.headers.get('Content-Type') or '').split(';')[0].strip()
+    if not ctype.startswith(_COMPRESSIBLE_TYPES):
+        return resp
+
+    # Announced whether or not this particular response was compressed, because
+    # the representation varies by request header either way — a shared cache
+    # that missed it would hand a gzipped body to a client that never asked for
+    # one.
+    if 'accept-encoding' not in (resp.headers.get('Vary') or '').lower():
+        resp.headers.add('Vary', 'Accept-Encoding')
+
+    if (resp.status_code != 200
+            # A streamed response has no body to read here, and get_data() on
+            # one would buffer the whole thing to compress it.
+            or resp.direct_passthrough
+            or resp.headers.get('Content-Encoding')
+            or 'gzip' not in (request.headers.get('Accept-Encoding') or '').lower()):
+        return resp
+
+    body = resp.get_data()
+    # Below about a kilobyte the gzip header and trailer cost more than the
+    # compression saves, and most responses here are a two-field JSON object.
+    if len(body) < _COMPRESS_MIN_BYTES:
+        return resp
+
+    resp.set_data(_gzip.compress(body, 6))
+    resp.headers['Content-Encoding'] = 'gzip'
+    resp.headers['Content-Length']   = str(resp.calculate_content_length())
     return resp
 
 
@@ -5778,17 +6578,14 @@ def _run_report(job_id: str, ticker: str, owner: str) -> None:
                            error=f'Invalid ticker: {ticker!r}')
             return
 
-        env = os.environ.copy()
-        env['PYTHONIOENCODING'] = 'utf-8'
         # This account's own keys — the report is built for them and any LLM
         # spend inside build_report.py should land on their key, not a shared one.
         # owner= is required: this runs on a worker thread with no request, so
         # _current_username() has no session to resolve and would (correctly)
-        # refuse rather than guess whose keys to spend.
-        _cfg = _load_settings(owner)
-        for _k, _v in _cfg.items():
-            if _k not in env and _v:
-                env[_k] = _v
+        # refuse rather than guess whose keys to spend. Shared with the guidance
+        # launcher: this used to fill the environment with `if _k not in env`,
+        # which let an exported key win over the account's own.
+        env = _account_env(owner)
 
         # No shell: argv is passed through verbatim, so nothing in `ticker` can
         # be read as a command separator. Uses this interpreter rather than
@@ -5899,6 +6696,330 @@ def report_file(ticker):
     if not os.path.exists(pdf_path):
         return jsonify({'error': 'PDF not found'}), 404
     return _send_file(pdf_path, mimetype='application/pdf', as_attachment=False)
+
+
+# ---------------------------------------------------------------------------
+# Forward guidance
+#
+# Forward Guide is a separate project that reads a company's earnings 8-K press
+# release and, when the guidance was only ever spoken, its earnings call, and
+# returns what the company said it expects — plus the earnings, margin and cash
+# figures those statements imply. It runs here the same way StockBox does: a
+# subprocess, on a worker thread, spending *this account's* keys.
+#
+# Two things about the trigger are deliberate. It never runs on page load —
+# a stock page opening would otherwise spend an LLM key on every lookup, and the
+# figures move once a quarter, on a filing. And it is not started by rendering
+# the panel either: `GET /api/forward_guidance` reads what is already stored and
+# starts nothing, so a ticker looked up before shows instantly and for free.
+# Only POST .../run spends anything, and only the button reaches it.
+# ---------------------------------------------------------------------------
+_FORWARD_GUIDE_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'Forward Guide')
+)
+
+# Keyed by the symbol the user asked about, not the filer Forward Guide
+# resolved it to: the page knows MSFT.TO and would never find an entry filed
+# under MSFT. The resolution is recorded *inside* the entry, because "this is
+# the US filer behind your CDR" is worth saying out loud.
+#
+#   {'version': 1, 'tickers': {'MSFT.TO': {...}}}
+#
+# A dict rather than a list for the same reason the report copy is per account:
+# a second lookup of a ticker replaces its entry and touches nothing else.
+FORWARD_GUIDANCE_VERSION = 1
+
+
+def _migrate_forward_guidance(data):
+    """Fold a pre-button `report.py --push` payload into the per-ticker shape.
+
+    That file was written by a batch run across the whole portfolio and carried
+    one flat list of scorecards and one of items covering every company at
+    once. The button keys on the symbol asked about, so the flat lists are
+    regrouped and kept rather than dropped: this is guidance already extracted
+    and already paid for, and discarding it would make the first press of every
+    button spend to learn what the file already knew.
+
+    Any per-ticker entry already present wins — it was written by a run through
+    this route, which is newer than the batch that produced the flat lists.
+
+    The one thing this cannot recover is the TSX mapping. The legacy payload
+    records no resolution, so a row filed by MSFT lands under `MSFT` and a
+    lookup of MSFT.TO re-runs — which is cheap, because the extraction itself
+    is cached upstream. Filing Microsoft's guidance under a symbol the user
+    never asked about would be the worse guess.
+    """
+    if not isinstance(data, dict):
+        return data
+    cards = data.get('scorecards')
+    items = data.get('items')
+    if not isinstance(cards, list) and not isinstance(items, list):
+        return data                      # already the per-ticker shape
+
+    stamp = data.get('generated_at') or ''
+    tickers: dict = {}
+
+    def _slot(sym):
+        return tickers.setdefault(sym, {
+            'symbol': sym, 'sec_ticker': sym, 'reachable': True, 'reason': '',
+            'generated_at': stamp, 'scorecards': [], 'items': [],
+        })
+
+    for row in cards if isinstance(cards, list) else []:
+        sym = str((row or {}).get('ticker') or '').upper()
+        if sym:
+            _slot(sym)['scorecards'].append(row)
+    for row in items if isinstance(items, list) else []:
+        sym = str((row or {}).get('ticker') or '').upper()
+        if sym:
+            _slot(sym)['items'].append(row)
+    for row in data.get('unreachable') or []:
+        sym = str((row or {}).get('symbol') or '').upper()
+        if sym:
+            entry = _slot(sym)
+            entry['reachable'] = False
+            entry['reason'] = row.get('reason') or ''
+
+    existing = data.get('tickers')
+    if isinstance(existing, dict):
+        tickers.update(existing)
+    return {'version': FORWARD_GUIDANCE_VERSION, 'tickers': tickers}
+
+
+FORWARD_GUIDANCE_FILE = _register_user_file('forward_guidance.json', dict,
+                                            migrate=_migrate_forward_guidance)
+
+_guidance_jobs: dict = {}   # job_id -> {status, ticker, owner, started, error?}
+_guidance_jobs_lock = threading.Lock()
+
+# Same argument as REPORT_MAX_CONCURRENT: the cost of a run is that it lives for
+# a minute or two — EDGAR, an LLM extraction and a yfinance walk — not that it
+# is asked for often, and a rate limit cannot bound how many are alive at once.
+# Per account, so one user cannot starve another.
+GUIDANCE_MAX_CONCURRENT = int(os.environ.get('GUIDANCE_MAX_CONCURRENT', '2') or 2)
+_GUIDANCE_JOB_TTL = 6 * 3600
+_GUIDANCE_TIMEOUT = 300
+
+
+def _finish_guidance(job_id: str, **fields) -> None:
+    """Record an outcome without dropping `started`, which the TTL prune reads.
+
+    Assigning a fresh dict here is the bug _finish_report() documents: nothing
+    else removes an entry, and the concurrency check walks this dict on every
+    request.
+    """
+    with _guidance_jobs_lock:
+        job = dict(_guidance_jobs.get(job_id) or {})
+        job.update(fields)
+        _guidance_jobs[job_id] = job
+
+
+def _merge_guidance(owner: str, symbol: str, entry: dict) -> None:
+    """Fold one ticker's result into this account's stored payload.
+
+    Through the store rather than written from the subprocess: `JsonStore`
+    holds its lock across the read and the write, and a foreign process
+    replacing the file wholesale would erase every other ticker in it — which
+    is exactly what `report.py --push` does, and why the run writes to a temp
+    file and this does the merging.
+    """
+    def _apply(data):
+        data = data if isinstance(data, dict) else {}
+        tickers = data.get('tickers')
+        data['tickers'] = tickers if isinstance(tickers, dict) else {}
+        data['version'] = FORWARD_GUIDANCE_VERSION
+        data['tickers'][symbol] = entry
+        return data
+
+    _user_store(FORWARD_GUIDANCE_FILE, owner).mutate(_apply)
+
+
+def _guidance_entry(symbol: str, payload: dict) -> dict:
+    """One stored entry, built from what the run returned.
+
+    Forward Guide answers about the filer; `resolved` carries the mapping back
+    to the symbol that was asked about. An unreachable symbol still produces an
+    entry, carrying its reason — "files 40-F/6-K, so never an 8-K item 2.02" is
+    a different fact from "this company gave no guidance", needs a different
+    fix, and only one of them is worth retrying.
+    """
+    resolved = next(
+        (r for r in payload.get('resolved') or []
+         if str(r.get('symbol', '')).upper() == symbol.upper()),
+        {},
+    )
+    return {
+        'symbol': symbol,
+        'sec_ticker': resolved.get('sec_ticker') or symbol,
+        'reachable': bool(resolved.get('reachable', True)),
+        'reason': resolved.get('reason') or '',
+        'generated_at': payload.get('generated_at') or '',
+        'scorecards': payload.get('scorecards') or [],
+        'items': payload.get('items') or [],
+    }
+
+
+def _run_guidance(job_id: str, symbol: str, owner: str) -> None:
+    import tempfile
+
+    proc = None
+    out_path = None
+    try:
+        # Defence in depth: the route validates, but this string reaches an
+        # argv, and _run_report documents what a raw .strip().upper() cost.
+        if clean_ticker(symbol) is None:
+            _finish_guidance(job_id, status='error', ticker=symbol, owner=owner,
+                             error=f'Invalid ticker: {symbol!r}')
+            return
+
+        fd, out_path = tempfile.mkstemp(prefix='fg_', suffix='.json')
+        os.close(fd)
+
+        # No shell, and this interpreter rather than whatever `python` resolves
+        # to. --json is the machine-readable handoff; --push is deliberately not
+        # passed, because it would write this one ticker's payload over the
+        # account's whole file. --brief keeps the piped log to the outlook
+        # itself, which is what makes a failure diagnosable in the tail.
+        proc = subprocess.Popen(
+            [sys.executable, '-u', 'report.py',
+             '--tickers', symbol, '--fetch', '--brief', '--json', out_path],
+            env=_account_env(owner),
+            cwd=_FORWARD_GUIDE_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+        )
+
+        tail = collections.deque(maxlen=40)
+        for line in proc.stdout:
+            line = line.rstrip()
+            tail.append(line)
+            print(f'[GUIDANCE] {symbol}: {line}', flush=True)
+
+        proc.wait(timeout=_GUIDANCE_TIMEOUT)
+        detail = '\n'.join(tail).strip() or '(no output)'
+
+        if proc.returncode != 0:
+            _finish_guidance(job_id, status='error', ticker=symbol, owner=owner,
+                             error=f'report.py exited with code {proc.returncode}.',
+                             detail=detail)
+            return
+
+        try:
+            with open(out_path, encoding='utf-8') as f:
+                payload = json.load(f)
+        except Exception:
+            # Exit 0 with no payload is a real outcome, not a crash: nothing
+            # was extracted and nothing was written. Say so rather than
+            # reporting a failure the log does not explain.
+            _finish_guidance(job_id, status='error', ticker=symbol, owner=owner,
+                             error='The run produced no payload.', detail=detail)
+            return
+
+        entry = _guidance_entry(symbol, payload)
+        _merge_guidance(owner, symbol, entry)
+        _finish_guidance(job_id, status='done', ticker=symbol, owner=owner,
+                         items=len(entry['items']),
+                         periods=len(entry['scorecards']),
+                         reachable=entry['reachable'])
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            proc.kill()
+        _finish_guidance(job_id, status='error', ticker=symbol, owner=owner,
+                         error=f'Timed out after {_GUIDANCE_TIMEOUT // 60} minutes.')
+    except Exception as e:
+        _finish_guidance(job_id, status='error', ticker=symbol, owner=owner,
+                         error=str(e))
+    finally:
+        if out_path:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+
+
+@app.route('/api/forward_guidance', methods=['GET'])
+def forward_guidance():
+    """What is already stored for this account. Starts nothing, spends nothing.
+
+    This is what the stock page reads when it opens a ticker it has looked up
+    before, so it must stay free — the moment a read could trigger a run, every
+    page load would spend an API key.
+    """
+    data = _user_store(FORWARD_GUIDANCE_FILE).load() or {}
+    tickers = data.get('tickers') if isinstance(data, dict) else {}
+    tickers = tickers if isinstance(tickers, dict) else {}
+
+    wanted = request.args.get('ticker')
+    if wanted:
+        tkkr = clean_ticker(wanted)
+        if not tkkr:
+            return jsonify({'error': 'invalid ticker'}), 400
+        entry = tickers.get(tkkr)
+        return jsonify({'version': FORWARD_GUIDANCE_VERSION,
+                        'ticker': tkkr, 'entry': entry})
+    return jsonify({'version': FORWARD_GUIDANCE_VERSION, 'tickers': tickers})
+
+
+@app.route('/api/forward_guidance/run', methods=['POST'])
+def forward_guidance_run():
+    data   = request.get_json(silent=True) or {}
+    symbol = clean_ticker(data.get('ticker'))
+    if not symbol:
+        return jsonify({'error': 'valid ticker required'}), 400
+
+    # Refused independently of /api/stock rather than leaning on it. This route
+    # spends the account's Anthropic key, and it is reachable on its own — the
+    # same reason /api/news does its own check instead of trusting that the
+    # detail page already 403'd.
+    if symbol in _blocked_set():
+        return jsonify({'error': f'{symbol} is hidden.',
+                        'blocked': True, 'ticker': symbol}), 403
+
+    owner = _current_username()
+
+    # Checked here so the answer is a sentence rather than a subprocess that
+    # exits 1 a second later with the reason buried in a log tail.
+    if not _resolve_api_key('ANTHROPIC_API_KEY', owner):
+        return jsonify({'error': 'No Anthropic API key configured. Add one on '
+                                 'the Settings tab — guidance extraction runs '
+                                 'on your own key.',
+                        'needs_key': 'ANTHROPIC_API_KEY'}), 400
+
+    job_id = str(_uuid.uuid4())
+    now    = _time_mod.time()
+    with _guidance_jobs_lock:
+        for jid, job in list(_guidance_jobs.items()):
+            if job.get('status') != 'running' and \
+                    now - job.get('started', now) > _GUIDANCE_JOB_TTL:
+                _guidance_jobs.pop(jid, None)
+        running = sum(1 for job in _guidance_jobs.values()
+                      if job.get('status') == 'running' and job.get('owner') == owner)
+        if running >= GUIDANCE_MAX_CONCURRENT:
+            return jsonify({'error': f'{running} guidance run(s) already going. '
+                                     f'Wait for one to finish.'}), 429
+        _guidance_jobs[job_id] = {'status': 'running', 'ticker': symbol,
+                                  'owner': owner, 'started': now}
+
+    threading.Thread(target=_run_guidance, args=(job_id, symbol, owner),
+                     daemon=True).start()
+    # Told up front so the UI can say the transcript fallback is off rather than
+    # leave "no guidance" standing for a company that only ever said it aloud.
+    return jsonify({'job_id': job_id,
+                    'transcripts': bool(_resolve_api_key('ALPHAVANTAGE_API_KEY', owner))})
+
+
+@app.route('/api/forward_guidance/status/<job_id>', methods=['GET'])
+def forward_guidance_status(job_id):
+    job = _guidance_jobs.get(job_id)
+    # Someone else's job reads as absent rather than forbidden: a uuid4 is
+    # unguessable, but unguessable is not an access check, and `detail` is a
+    # run log from another account.
+    if not job or job.get('owner') != _current_username():
+        return jsonify({'error': 'unknown job'}), 404
+    return jsonify(job)
 
 
 # Insider transaction classification.
@@ -6805,7 +7926,11 @@ def _portfolio_symbols():
     raw = [h.get('ticker', '') for h in load_holdings()] + \
           [w.get('ticker', '') for w in load_watchlist()]
     clean = [clean_ticker(t) for t in dict.fromkeys(raw) if t]
-    return [t for t in dict.fromkeys(clean) if t]
+    # A hidden holding still counts in every money figure — that arithmetic is
+    # not a discovery surface — but a feed of headlines about it is exactly
+    # what a block is for.
+    hidden = _blocked_set()
+    return [t for t in dict.fromkeys(clean) if t and t not in hidden]
 
 
 @app.route('/api/news/positions', methods=['GET'])
@@ -6861,6 +7986,675 @@ def get_positions_news():
 
     out = sorted(merged.values(), key=lambda i: i.get('pub_ts') or '', reverse=True)
     return jsonify({'items': out, 'symbols': symbols})
+
+
+# ── Index browser ─────────────────────────────────────────────────────────────
+#
+# An index is two independent facts: who is in it, and what those names are
+# doing today. They move on completely different clocks — membership changes a
+# handful of times a year, quotes change by the minute — so they are fetched,
+# cached and *failed* separately. One combined fetch would either re-scrape a
+# constituent list every two minutes or serve yesterday's prices, and a
+# Wikipedia outage would take the prices down with it.
+
+_INDEX_SOURCES = {
+    'sp500': {
+        'label':  'S&P 500',
+        'url':    'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies',
+        'symbol': 'Symbol',
+        'name':   'Security',
+        'suffix': '',
+        'min':    400,
+    },
+    'ndx': {
+        'label':  'Nasdaq-100',
+        # Not /wiki/Nasdaq-100 — the components table lives on its own page,
+        # and the index article keeps nothing but a navbox link to it.
+        'url':    'https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies',
+        'symbol': 'Ticker',
+        'name':   'Company',
+        'suffix': '',
+        'min':    80,
+    },
+    'dow': {
+        'label':  'Dow 30',
+        'url':    'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average',
+        'symbol': 'Symbol',
+        'name':   'Company',
+        'suffix': '',
+        'min':    25,
+    },
+    'tsx60': {
+        'label':  'S&P/TSX 60',
+        'url':    'https://en.wikipedia.org/wiki/S%26P/TSX_60',
+        'symbol': 'Symbol',
+        'name':   'Company',
+        # Wikipedia lists the bare TSX symbol; Yahoo wants the venue on it.
+        'suffix': '.TO',
+        'min':    50,
+    },
+}
+
+# An index is a curated list of a few hundred names; an exchange is everything
+# that trades on a venue. They differ in exactly one place — where the membership
+# comes from — so everything downstream is shared: the daily membership cache,
+# the batch quote fetch, the row builder, the market-cap fill, the payload cache
+# and the route. Adding a venue is a table entry, not a second code path.
+#
+# The listing files below are the canonical free sources and are republished
+# daily. Nasdaq Trader's SymDir covers every US venue in two pipe-delimited
+# files; TMX's own company directory covers Toronto. Both move on the same slow
+# clock as index membership, which is why they share its cache and its
+# raise-rather-than-return discipline.
+#
+# NYSE Arca and Cboe BZX are deliberately absent. They are ETF venues: of 2,697
+# Arca listings 15 are common stock, and of 1,578 BZX listings 4 are. A tab for
+# either would be a filter box over an empty table.
+_SYMDIR_URLS = {
+    'nasdaq': 'https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt',
+    'other':  'https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt',
+}
+_TMX_DIRECTORY = 'https://www.tsx.com/json/company-directory/search/{board}/%5E*'
+
+# `min` is the same gate _INDEX_SOURCES uses, sized well under the real count
+# (measured 2026-08-10: nasdaq 3402, nyse 2184, amex 268, tsx 2266, tsxv 1431).
+# It is what tells a parser that broke from a venue that shrank.
+_EXCHANGE_SOURCES = {
+    'nasdaq': {'label': 'Nasdaq',        'file': 'nasdaq',               'min': 2000},
+    'nyse':   {'label': 'NYSE',          'file': 'other', 'venue': 'N',  'min': 1200},
+    'amex':   {'label': 'NYSE American', 'file': 'other', 'venue': 'A',  'min':  120},
+    'tsx':    {'label': 'TSX',           'board': 'tsx',  'suffix': '.TO', 'min': 1000},
+    'tsxv':   {'label': 'TSX Venture',   'board': 'tsxv', 'suffix': '.V',  'min':  600},
+}
+
+# The one registry both halves are looked up in. Keys must not collide — an
+# index and an exchange answering to the same name would make the route's
+# dispatch depend on dict ordering — and a test asserts they don't.
+_UNIVERSES = {
+    **{k: {'label': v['label'], 'kind': 'index'}
+       for k, v in _INDEX_SOURCES.items()},
+    **{k: {'label': v['label'], 'kind': 'exchange'}
+       for k, v in _EXCHANGE_SOURCES.items()},
+}
+
+INDEX_MEMBERS_TTL = 24 * 3600   # membership changes a few times a year
+INDEX_QUOTES_TTL  = 120         # one trading minute, near enough
+
+# Membership is persisted, not just memoised, because the failure it guards
+# against outlives the process. A shared store rather than a per-user one for
+# the same reason the market-news payload is shared: it is public, market-wide
+# data that is identical for every account, and rebuilding it per user would
+# multiply the upstream work for a byte-identical answer.
+_index_members_store = JsonStore('index_constituents.json', dict)
+_index_members_lock  = threading.RLock()
+
+
+def _index_symbol(raw, suffix):
+    """A Wikipedia symbol in Yahoo's spelling, or None if it isn't one.
+
+    A share class is a dot on the exchange and a hyphen at Yahoo — BRK.B is
+    BRK-B, TECK.B is TECK-B.TO. The movers table already does this conversion
+    in the other direction for display, and `_index_row` reverses it back.
+
+    Runs through clean_ticker() like every other boundary here. This is scraped
+    third-party text: a footnote marker, a merged header row or an em dash for
+    a pending addition all arrive looking like a symbol, and this one reaches a
+    URL query.
+    """
+    text = str(raw).replace('\xa0', ' ').strip().upper()
+    text = text.split('[')[0].strip()      # 'BRK.B[a]' — Wikipedia footnotes
+    if not text or text == 'NAN':
+        return None
+    return clean_ticker(text.replace('.', '-') + suffix)
+
+
+def _scrape_index_members(key):
+    """Constituents of one index from Wikipedia, or raise.
+
+    Raises rather than returning [] on a thin parse, the same distinction
+    `_fetch_div_events` keeps: the caller cannot tell "this index is empty"
+    from "the table moved", and only one of those may be allowed to overwrite a
+    good stored list. Every one of these pages carries other tables with the
+    same column names — the Dow article alone has thirty-odd — so the row count
+    is what picks the components table out, not the column names alone.
+    """
+    import io
+    import requests as _req
+
+    src = _INDEX_SOURCES[key]
+    resp = _req.get(src['url'], headers={'User-Agent': _MT_UA}, timeout=15)
+    resp.raise_for_status()
+
+    # keep_default_na=False is load-bearing, not tidiness. pandas treats 'NA'
+    # as a missing value by default, and NA is National Bank of Canada's
+    # symbol — so the TSX 60 came back with 59 members and no error anywhere,
+    # the bank simply absent from the table. 'NULL', 'NaN' and 'None' are on
+    # the same default list and are all plausible symbols. An empty cell then
+    # arrives as '' rather than NaN, which _index_symbol already refuses.
+    for frame in pd.read_html(io.StringIO(resp.text), keep_default_na=False):
+        cols = [str(c) for c in frame.columns]
+        if src['symbol'] not in cols or src['name'] not in cols:
+            continue
+        rows, seen = [], set()
+        for sym, name in zip(frame[src['symbol']], frame[src['name']]):
+            full = _index_symbol(sym, src['suffix'])
+            if not full or full in seen:
+                continue
+            seen.add(full)
+            rows.append({'full_ticker': full, 'name': str(name).strip()})
+        if len(rows) >= src['min']:
+            return rows
+
+    raise RuntimeError(
+        f"no table at {src['url']} with >= {src['min']} usable rows under "
+        f"columns {src['symbol']!r}/{src['name']!r}")
+
+
+# A listing file names every *security* on a venue, not every stock: rights,
+# units, warrants, preferreds and baby bonds each trade under their own symbol
+# and arrive in the same column as the common shares. They are excluded here
+# rather than left in, because none of them has a P/E or a market cap — a row
+# for one is a row of dashes that still takes a line of the table and a slot in
+# every sort. On Nasdaq alone that is 918 of 5,577 symbols.
+#
+# Two cases the word list alone gets wrong, both measured:
+#
+#   'American Depositary Shares' has to survive the bare 'Depositary Shares'
+#   rule that marks a preferred. An ADR *is* the common equity of a foreign
+#   issuer, and 168 Nasdaq listings are spelled exactly that way.
+#
+#   A coupon in the name — 'Aegon Funding Company LLC 5.10% Subordinated Notes'
+#   — is the tell for a baby bond. Some are spelled without any of the words
+#   below, so the percentage is what catches them.
+_NONCOMMON_RE = _re_mod.compile(
+    r'\b(warrants?|rights?|units?|debentures?|notes?|bonds?|preferred|'
+    r'preference|pfd|convertible|subordinated|when[-\s]issued|'
+    r'contingent\s+value|liquidating\s+trust|'
+    r'depositary\s+shares?|depository\s+shares?)\b', _re_mod.I)
+_ADR_RE    = _re_mod.compile(r'\bamerican\s+depositar', _re_mod.I)
+_COUPON_RE = _re_mod.compile(r'\d\s*%')
+
+# TMX names a Canadian Depositary Receipt outright — 'Nvidia CDR (CAD Hedged)'.
+# That is the only marker there is, and it is a reliable one.
+_CDR_RE = _re_mod.compile(r'\bCDR\b|canadian\s+depositar', _re_mod.I)
+
+
+def _is_common_stock(name):
+    """Whether a listing-file security name describes common equity."""
+    text = str(name or '')
+    if _ADR_RE.search(text):
+        return True
+    return not (_COUPON_RE.search(text) or _NONCOMMON_RE.search(text))
+
+
+def _symdir_display_name(raw):
+    """'Apple Inc. - Common Stock' -> 'Apple Inc.'
+
+    Only ever a fallback: `_index_row` prefers the quote's own longName and
+    reaches for this when Yahoo sends neither name.
+    """
+    text = str(raw or '').strip()
+    return text.split(' - ')[0].strip() or text
+
+
+def _symdir_rows(which):
+    """Every row of one Nasdaq Trader listing file, keyed by its own header.
+
+    The files are pipe-delimited with a header line and a 'File Creation Time'
+    footer. The footer is dropped here — left in, it parses as a security whose
+    symbol is that literal text, which `_index_symbol` would then refuse one
+    layer too late to be readable.
+    """
+    import requests as _req
+
+    resp = _req.get(_SYMDIR_URLS[which], headers={'User-Agent': _MT_UA}, timeout=20)
+    resp.raise_for_status()
+    lines = [ln for ln in resp.text.splitlines()
+             if ln.strip() and not ln.startswith('File Creation Time')]
+    if len(lines) < 2:
+        raise RuntimeError(f'{which} listing file came back with no rows')
+    header = lines[0].split('|')
+    return [dict(zip(header, ln.split('|'))) for ln in lines[1:]]
+
+
+def _scrape_symdir_members(src):
+    """Common stock on one US venue."""
+    rows, seen = [], set()
+    for raw in _symdir_rows(src['file']):
+        # nasdaqlisted.txt calls the column 'Symbol'. otherlisted.txt calls it
+        # 'ACT Symbol' and adds 'Exchange', because one file carries five venues
+        # (N NYSE, A NYSE American, P Arca, Z Cboe BZX, V IEX).
+        if src.get('venue') and raw.get('Exchange') != src['venue']:
+            continue
+        # A test issue is a symbol the venue reserves for its own systems
+        # checks. It is not a security and Yahoo does not price it.
+        if raw.get('Test Issue') == 'Y' or raw.get('ETF') == 'Y':
+            continue
+        if not _is_common_stock(raw.get('Security Name')):
+            continue
+        full = _index_symbol(raw.get('Symbol') or raw.get('ACT Symbol') or '', '')
+        if not full or full in seen:
+            continue
+        seen.add(full)
+        rows.append({'full_ticker': full,
+                     'name': _symdir_display_name(raw.get('Security Name'))})
+    return rows
+
+
+def _scrape_tmx_members(src):
+    """Every issuer on one TMX board, from its own company directory.
+
+    Only the company-level symbol is taken, never the `instruments` array under
+    it. That array carries an issuer's other series — the USD-denominated class
+    of a fund (BTCQ and BTCQ.U), separate unit classes — which are the same
+    company twice in a table that is one row per company. Measured: 2,266 TSX
+    companies expand to 2,999 instruments, and the extra 733 are duplicates of
+    names already in the list.
+
+    There is no security-type field here, so the common-stock filter above
+    cannot run on this source. `quoteType` does that job instead, downstream and
+    for every venue at once — see `_build_index`.
+
+    What the directory does name outright is a depositary receipt, and 133 of
+    the 2,266 TSX entries are one. They are flagged rather than dropped; see
+    `_index_row` for what the flag suppresses and why the row stays.
+    """
+    import requests as _req
+
+    resp = _req.get(_TMX_DIRECTORY.format(board=src['board']),
+                    headers={'User-Agent': _MT_UA}, timeout=20)
+    resp.raise_for_status()
+    rows, seen = [], set()
+    for company in ((resp.json() or {}).get('results') or []):
+        full = _index_symbol(company.get('symbol'), src['suffix'])
+        if not full or full in seen:
+            continue
+        seen.add(full)
+        name = str(company.get('name') or '').strip()
+        row  = {'full_ticker': full, 'name': name}
+        if _CDR_RE.search(name):
+            row['dr'] = True
+        rows.append(row)
+    return rows
+
+
+def _scrape_exchange_members(key):
+    """Every listing on one exchange, or raise.
+
+    Raises on a thin parse for the same reason `_scrape_index_members` does: a
+    venue that comes back with forty names is a parser that broke, not a venue
+    that delisted three thousand companies — and only one of those may be
+    allowed to overwrite a good stored list.
+    """
+    src  = _EXCHANGE_SOURCES[key]
+    rows = (_scrape_tmx_members(src) if src.get('board')
+            else _scrape_symdir_members(src))
+    if len(rows) < src['min']:
+        raise RuntimeError(
+            f'{key}: listing source returned {len(rows)} usable rows, '
+            f'expected at least {src["min"]}')
+    return rows
+
+
+def _index_members(key):
+    """Constituents, refreshed at most daily and persisted across restarts.
+
+    A scrape that fails or comes back thin leaves the stored list exactly where
+    it was, so a Wikipedia redesign degrades to a slightly stale membership
+    list instead of an empty page — and it degrades that way after a restart
+    too, which is the whole reason this is a file and not a dict. A failure is
+    logged rather than swallowed, because a silently stale index looks exactly
+    like a working one.
+
+    Serves both kinds of universe. An exchange's listing file is a different
+    source with the same properties — public, market-wide, republished daily,
+    and worse to lose than to serve a day stale — so it gets the same cache
+    rather than a parallel one.
+    """
+    with _index_members_lock:
+        cached = (_index_members_store.load() or {}).get(key) or {}
+        rows   = cached.get('rows')
+        if rows and _time_mod.time() - (cached.get('ts') or 0) < INDEX_MEMBERS_TTL:
+            return rows
+
+        try:
+            # Resolved through the module globals rather than a callable stored
+            # in _UNIVERSES, so that patching either scraper — which the tests
+            # covering the degrade-to-stale path do — still takes effect.
+            fresh = (_scrape_exchange_members(key)
+                     if _UNIVERSES.get(key, {}).get('kind') == 'exchange'
+                     else _scrape_index_members(key))
+        except Exception as e:
+            print(f'[INDEX] {key}: membership refresh failed, keeping '
+                  f'{len(rows or [])} stored: {type(e).__name__}: {e}', flush=True)
+            if rows:
+                return rows
+            raise
+
+        _index_members_store.mutate(
+            lambda data: {**data, key: {'rows': fresh, 'ts': _time_mod.time()}})
+        return fresh
+
+
+# Symbols per Yahoo quote call. 100 keeps the URL far inside any length limit
+# while putting the whole S&P 500 in five requests.
+_INDEX_QUOTE_CHUNK = 100
+
+
+def _index_quotes(symbols):
+    """{symbol: quote} from Yahoo's batch quote endpoint.
+
+    This is the endpoint the screener behind /api/movers already reads, and it
+    carries price, daily change, the 52-week range, trailing P/E and market cap
+    in one response — so a 500-name index costs five requests rather than five
+    hundred `.info` lookups. Measured: 503 symbols in 0.37s.
+
+    It goes through yfinance's YfData because the endpoint requires a crumb and
+    cookie pair that yfinance already negotiates, caches and refreshes on
+    expiry. Re-implementing that here would be a second copy of precisely the
+    part most likely to break.
+
+    A chunk that fails is skipped, not raised on: the caller renders the names
+    it did get, the same way /api/quotes leaves a failed symbol absent rather
+    than blanking its row. Symbols are clean_ticker()'d upstream, so joining
+    them into the query needs no escaping.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from yfinance.data import YfData
+
+    fetcher = YfData()
+    chunks  = [symbols[i:i + _INDEX_QUOTE_CHUNK]
+               for i in range(0, len(symbols), _INDEX_QUOTE_CHUNK)]
+    if not chunks:
+        return {}
+
+    def grab(chunk):
+        try:
+            resp = fetcher.cache_get(
+                'https://query2.finance.yahoo.com/v7/finance/quote?symbols='
+                + ','.join(chunk))
+            return (resp.json().get('quoteResponse') or {}).get('result') or []
+        except Exception as e:
+            print(f'[INDEX] quote batch of {len(chunk)} failed: '
+                  f'{type(e).__name__}: {e}', flush=True)
+            return []
+
+    out = {}
+    with ThreadPoolExecutor(max_workers=min(6, len(chunks))) as ex:
+        for result in ex.map(grab, chunks):
+            for quote in result:
+                if quote.get('symbol'):
+                    out[quote['symbol']] = quote
+    return out
+
+
+# Yahoo's quote endpoint omits marketCap outright for a stable minority of large
+# listings — Home Depot, Exxon, Lowe's, McDonald's, Merck and Salesforce among
+# them, 26 of the S&P 500 and 4 of the Dow. It omits sharesOutstanding with it,
+# so there is nothing in the response to derive it from, and naming the field
+# explicitly does not bring it back. Not flaky: the same symbols come back empty
+# on every request, alone or in a batch.
+#
+# It matters more than the other gaps because market cap is this table's default
+# sort. Left null those names sort below every company in the index, so the
+# first thing anyone sees is Home Depot beneath a $5B utility — which reads as a
+# broken table rather than as one missing figure. At exchange scale the same gap
+# is 256 of 2,180 NYSE equities, and the largest of them by traded value are
+# XOM, CRM, MCD, B, HD, SE, TGT, MDT and MRK.
+#
+# What is cached to fill it is the *share count*, not the cap. fast_info carries
+# both, but a cap held for a day is a day-stale number in the column the table
+# sorts by, while shares outstanding move on the slow clock membership does. So
+# the count is stored and multiplied by the current price on every build, which
+# is the definition of market cap and keeps the figure live between fetches.
+# Verified against Yahoo's own marketCap on the 116 sampled names that report
+# both: price x shares reproduces it to a ratio of 1.0000.
+#
+# That distinction is what makes this affordable at all. The fetch is one
+# request per symbol — ~24ms at 16 threads, so ~3s for a cold NYSE — and without
+# the cache every 120-second payload rebuild would pay it again.
+SHARE_COUNT_TTL         = 24 * 3600
+_INDEX_CAP_BACKFILL_MAX = 150
+
+# Shared, not per-user: a share count is public market data identical for every
+# account, the same reasoning as index_constituents.json and the market-news
+# payload. It must not be registered with _register_user_file().
+_share_counts_store = JsonStore('share_counts.json', dict)
+
+# Symbols are only ever added here, so without a prune the file grows for the
+# life of the install — roughly 8,000 entries across the five venues, plus every
+# symbol that has ever been delisted. A week is comfortably longer than the TTL,
+# so pruning only ever drops entries that would be refetched anyway.
+_SHARE_COUNT_KEEP = 7 * 24 * 3600
+
+
+def _prune_share_counts(data, now):
+    return {sym: entry for sym, entry in (data or {}).items()
+            if isinstance(entry, dict)
+            and (entry.get('ts') or 0) > now - _SHARE_COUNT_KEEP}
+
+
+def _index_backfill_caps(symbols, quotes):
+    """{symbol: market cap} for the symbols the quote endpoint priced but capped
+    at nothing, as a cached share count times the live price.
+
+    Only ever asked for the symbols actually missing one, so a total quote
+    failure cannot turn into one request per member behind it.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def price_of(sym):
+        return _finite(quotes.get(sym, {}).get('regularMarketPrice'))
+
+    now    = _time_mod.time()
+    stored = _share_counts_store.load() or {}
+    caps, wanted = {}, []
+    for sym in symbols:
+        entry  = stored.get(sym) or {}
+        shares = _finite(entry.get('shares'))
+        if shares and now - (entry.get('ts') or 0) < SHARE_COUNT_TTL:
+            price = price_of(sym)
+            if price:
+                caps[sym] = price * shares
+        else:
+            wanted.append(sym)
+    if not wanted:
+        return caps
+
+    # Ordered by traded value so a bounded run spends itself on the names a
+    # reader would notice missing. Symbols already cached above are not in this
+    # list, so successive builds walk further down the tail instead of refetching
+    # the same head — the whole venue fills in over a few refreshes.
+    wanted.sort(key=lambda s: -((price_of(s) or 0)
+                                * (_finite(quotes.get(s, {}).get('regularMarketVolume')) or 0)))
+    if len(wanted) > _INDEX_CAP_BACKFILL_MAX:
+        # Logged rather than silently truncated: a sudden jump here means Yahoo
+        # dropped the field wholesale, and a quiet cap would hide that behind a
+        # column of dashes.
+        print(f'[INDEX] {len(wanted)} symbols missing marketCap, backfilling '
+              f'the {_INDEX_CAP_BACKFILL_MAX} largest by traded value', flush=True)
+        wanted = wanted[:_INDEX_CAP_BACKFILL_MAX]
+
+    def shares_of(sym):
+        try:
+            return _finite(getattr(yf.Ticker(sym).fast_info, 'shares', None))
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(16, len(wanted))) as ex:
+        found = {s: n for s, n in zip(wanted, ex.map(shares_of, wanted)) if n}
+
+    if found:
+        stamped = {s: {'shares': n, 'ts': now} for s, n in found.items()}
+        _share_counts_store.mutate(
+            lambda data: _prune_share_counts({**data, **stamped}, now))
+    for sym, shares in found.items():
+        price = price_of(sym)
+        if price:
+            caps[sym] = price * shares
+    return caps
+
+
+def _index_row(member, quote):
+    """One priced table row, or None if Yahoo would not price it.
+
+    Every figure is None when it is not reported rather than 0. A loss-making
+    company has no trailing P/E, and a 0.0 in that column reads as a real and
+    extraordinarily cheap valuation — the same call `_build_ownership` makes
+    about a missing institutional holding.
+    """
+    price = _finite(quote.get('regularMarketPrice'))
+    if price is None:
+        return None
+
+    full = member['full_ticker']
+    low  = _finite(quote.get('fiftyTwoWeekLow'))
+    high = _finite(quote.get('fiftyTwoWeekHigh'))
+
+    # Where the price sits in its own year: 0 at the low, 1 at the high. A
+    # degenerate range — a listing younger than a year, or a halted name —
+    # divides by zero, so it gets no position rather than a fabricated 0 that
+    # would draw the marker hard against the left edge.
+    pos = None
+    if low is not None and high is not None and high > low:
+        pos = max(0.0, min(1.0, (price - low) / (high - low)))
+
+    # A depositary receipt is a bank-created wrapper around a share listed
+    # somewhere else, and Yahoo attaches the *underlying company's* market cap
+    # to it: NVDA.TO comes back at C$6.81T, which is NVIDIA, against a CDR
+    # program worth a few hundred million. Left in, the six largest companies on
+    # the Toronto exchange are Nvidia, Apple, Alphabet, Microsoft, Amazon and
+    # Meta, and Royal Bank is not on the first screen — cap is the default sort.
+    #
+    # Suppressed rather than converted, the same call the cross-currency ratios
+    # make: the figure for the program itself appears nowhere in the payload, so
+    # there is nothing to put here instead. The row itself stays, because a
+    # CAD-hedged NVDA is a real thing to buy in Toronto and its price, day change
+    # and 52-week range are all its own. It sorts last on cap, where every other
+    # unreported figure already goes.
+    cap      = None if member.get('dr') else _finite(quote.get('marketCap'))
+    currency = quote.get('currency') or ''
+    return {
+        # Yahoo's spelling back to the exchange's, as the movers table shows it.
+        'ticker':      full.replace('.TO', '').replace('-', '.'),
+        'full_ticker': full,
+        # The venue's own name wins for a receipt. Yahoo calls NVDA.TO 'NVIDIA
+        # Corporation', which in a list of Toronto listings reads as NVIDIA
+        # being listed in Toronto; TMX calls it 'Nvidia CDR (CAD Hedged)'.
+        'name':        (member.get('name') if member.get('dr') else None)
+                       or quote.get('longName') or quote.get('shortName')
+                       or member.get('name') or full,
+        'price':       price,
+        'change':      _finite(quote.get('regularMarketChangePercent')),
+        'week52_low':  low,
+        'week52_high': high,
+        'week52_pos':  pos,
+        'pe':          _finite(quote.get('trailingPE')),
+        # Both, for the reason charts read `raw`: the table sorts on this
+        # column, and parsing '$3.45T' back into a number to do it would
+        # quantise every mega-cap to the same three digits.
+        'mkt_cap':     format_large_number(cap, _currency_symbol(currency)),
+        'mkt_cap_raw': cap,
+        'volume':      quote.get('regularMarketVolume'),
+        'currency':    currency,
+        'cur_symbol':  _currency_symbol(currency),
+    }
+
+
+def _build_index(key):
+    """The whole universe — an index or an exchange — priced, as one payload."""
+    kind    = _UNIVERSES[key]['kind']
+    members = _index_members(key)
+    quotes  = _index_quotes([m['full_ticker'] for m in members])
+
+    # An exchange's listing file has no security-type column worth trusting for
+    # this — TMX has none at all — so the type comes from the quote, which knows
+    # it for every venue at once. Without it the TSX tab is 1,528 ETFs over 714
+    # companies, and 70% of the table has no market cap because a fund has no
+    # such figure. Applied to exchanges only: an index constituent is an equity
+    # by construction, and a missing quoteType there should not drop a member.
+    funds = 0
+    if kind == 'exchange':
+        for sym, quote in list(quotes.items()):
+            if quote.get('regularMarketPrice') is None:
+                continue
+            if quote.get('quoteType') != 'EQUITY':
+                del quotes[sym]
+                funds += 1
+
+    # Only the priced-but-uncapped symbols, so a total quote failure does not
+    # turn into 500 fast_info requests behind it.
+    # A depositary receipt is skipped here too: its cap is deliberately null (see
+    # _index_row), so asking fast_info for one would spend a request to produce a
+    # number the row then throws away.
+    uncapped = [m['full_ticker'] for m in members
+                if not m.get('dr')
+                and quotes.get(m['full_ticker'], {}).get('regularMarketPrice')
+                and not quotes[m['full_ticker']].get('marketCap')]
+    for sym, cap in _index_backfill_caps(uncapped, quotes).items():
+        quotes[sym]['marketCap'] = cap
+
+    rows = [r for r in (_index_row(m, quotes.get(m['full_ticker'], {}))
+                        for m in members) if r]
+    if not rows:
+        raise RuntimeError(f'no rows priced out of {len(members)} members')
+    return {
+        'key':     key,
+        'kind':    kind,
+        'label':   _UNIVERSES[key]['label'],
+        'rows':    rows,
+        'count':   len(rows),
+        # Reported rather than hidden: an index Yahoo prices 498 of 503 names
+        # in is a fact about the data, and a bare "503 stocks" over a 498-row
+        # table is the kind of quiet mismatch nothing else here would catch.
+        # `funds` is counted apart from that so the page can say why a 2,266-name
+        # venue draws 714 rows — those are excluded, not missing.
+        'members': len(members),
+        'funds':   funds,
+    }
+
+
+_index_payload_cache = _TtlCache(INDEX_QUOTES_TTL)
+
+
+@app.route('/api/listing/<key>', methods=['GET'])
+@app.route('/api/index/<key>', methods=['GET'])
+def market_index(key):
+    """Every constituent of one index or exchange, priced, in a single response.
+
+    The whole universe ships at once — 503 rows is ~90KB, a 3,402-name Nasdaq
+    is ~876KB and gzips to ~171KB — because the sorting and filtering this page
+    exists for are then instant and cost no further requests. Same call the
+    market-news feed makes in shipping every category together so the chips
+    filter in memory. Paging it server-side would put a request on every sort,
+    and a sort that only orders the page you can see is not a sort.
+
+    Two URLs, one implementation: /api/index/<key> is what the four index keys
+    were published under and still answer on, /api/listing/<key> is the honest
+    spelling for a venue. One endpoint name, so there is still one rate-limit
+    bucket and one entry in _RATE_LIMITS.
+    """
+    key = (key or '').strip().lower()
+    if key not in _UNIVERSES:
+        return jsonify({'error': 'Unknown index'}), 404
+    try:
+        data = _index_payload_cache.get(key, _build_index)
+        # One built payload, filtered per reader — the same split the movers and
+        # tape caches make, and for the same reason: an index is public market
+        # data and rebuilding it per account would multiply the upstream work
+        # for an identical answer.
+        #
+        # `members` comes down with it because the frontend derives "unpriced"
+        # as members − funds − rows. Leave it at the universe's size and every
+        # hidden name is reported as a listing Yahoo would not price, which is a
+        # different and untrue statement about the data.
+        rows = _drop_blocked(data['rows'])
+        hidden = len(data['rows']) - len(rows)
+        return jsonify({**data, 'rows': rows, 'count': len(rows),
+                        'members': data['members'] - hidden, 'hidden': hidden})
+    except Exception as e:
+        print(f'[INDEX] {key}: build failed: {type(e).__name__}: {e}', flush=True)
+        return jsonify({'error': 'Could not load this index right now.'}), 502
 
 
 def _legacy_data_files():

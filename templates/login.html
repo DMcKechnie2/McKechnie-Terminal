@@ -150,6 +150,19 @@ button:disabled { opacity: .5; cursor: default; }
   line-height: 1.6;
   text-align: center;
 }
+
+/* Phone. The card is already `width: 100%; max-width: 380px`, so the layout
+   needs nothing — but the inputs do. iOS zooms the viewport whenever a focused
+   field's text is under 16px and does not zoom back out, and this is the one
+   page where that lands on a password field: the form scales up, shifts
+   sideways, and the Sign in button is off screen by the time you have finished
+   typing. Same floor as index.html's phone block. */
+@media (max-width: 640px) {
+  body   { padding: 16px; align-items: flex-start; padding-top: 8vh; }
+  .card  { padding: 28px 20px 24px; }
+  input  { font-size: 16px; padding: 12px 13px; }
+  button { font-size: 15px; padding: 14px; }
+}
 </style>
 </head>
 <body>

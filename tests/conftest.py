@@ -47,11 +47,15 @@ class SignedInClient(FlaskClient):
         return super().open(*args, **kwargs)
 
 
-# The two stores that are still one file for the whole app: the account list and
-# the session signing key. Everything else — portfolio *and* API keys — is
-# per-user and resolved through _user_store(), which builds its paths under
-# _USER_DATA_ROOT, so redirecting that root moves all of it at once.
-_STORE_NAMES = ('_users_store', '_app_secret_store')
+# The stores that are still one file for the whole app: the account list, the
+# session signing key, and the two market-data caches behind the index and
+# exchange browser — membership and share counts. Those last two are shared
+# because they are public market-wide data identical for every account, not
+# because they escaped the per-user split. Everything else — portfolio *and* API
+# keys — is per-user and resolved through _user_store(), which builds its paths
+# under _USER_DATA_ROOT, so redirecting that root moves all of it at once.
+_STORE_NAMES = ('_users_store', '_app_secret_store', '_index_members_store',
+                '_share_counts_store')
 
 
 def _temp_store(original, directory):
@@ -110,8 +114,13 @@ def _fresh_rate_buckets():
     opts back in and drives it on purpose.
     """
     terminal._rate_buckets.clear()
+    # Same argument one layer up: the index payload cache is keyed by index name
+    # with a 120s TTL, so a test that patches the fetchers would otherwise be
+    # answered from whatever the previous test built and never call them.
+    terminal._index_payload_cache.clear()
     yield
     terminal._rate_buckets.clear()
+    terminal._index_payload_cache.clear()
 
 
 @pytest.fixture(scope='session', autouse=True)

@@ -101,6 +101,7 @@ def test_parser_keys_on_the_period_end_date_not_the_year(mt_rows):
 
 @pytest.mark.parametrize('metric,expected', [
     ('earnings', 112.01e9),      # billions
+    ('revenue',  112.01e9),      # billions
     ('fcf',      112.01e6),      # millions
     ('eps',      112.01),        # dollars per share
     ('margin',   112.01),        # already a percentage
@@ -338,7 +339,7 @@ def test_a_dotted_ticker_starts_no_scrapes(monkeypatch):
 
 
 def test_scrapes_run_concurrently(monkeypatch):
-    """Five scrapes at ten seconds each, run one after another, is more than the
+    """Six scrapes at ten seconds each, run one after another, is more than the
     whole route deadline."""
     import time
     monkeypatch.setattr(terminal, '_mt_cached',
@@ -352,8 +353,8 @@ def test_scrapes_run_concurrently(monkeypatch):
 
 
 def test_reads_share_one_deadline_rather_than_one_each():
-    """Per-key timeouts compound: five reads at twelve seconds each is a minute
-    against a twenty-five second route deadline."""
+    """Per-key timeouts compound: six reads at twelve seconds each is over a
+    minute against a twenty-five second route deadline."""
     import concurrent.futures as cf
     import time
     never = cf.Future()
@@ -367,7 +368,7 @@ def test_reads_share_one_deadline_rather_than_one_each():
 def test_a_second_lookup_is_served_from_the_cache(monkeypatch):
     calls = []
     monkeypatch.setattr(terminal, 'scrape_macrotrends',
-                        lambda t, m: (calls.append((t, m)), {'2025-09-30': 1.0})[1])
+                        lambda t, m, freq='A': (calls.append((t, m, freq)), {'2025-09-30': 1.0})[1])
     terminal._mt_cache.clear()
     try:
         assert terminal._mt_cached('AAPL', 'earnings') == {'2025-09-30': 1.0}
@@ -377,12 +378,36 @@ def test_a_second_lookup_is_served_from_the_cache(monkeypatch):
         terminal._mt_cache.clear()
 
 
+def test_annual_and_quarterly_do_not_share_a_cache_key(monkeypatch):
+    """The two frequencies are different data under one metric name.
+
+    Sharing a key would serve whichever was fetched first — and since the annual
+    series is fetched on every stock page while the quarterly one is fetched only
+    on a toggle, that would reliably be the annual one: every quarterly chart
+    would silently draw forty annual bars relabelled Q1..Q4.
+    """
+    calls = []
+    monkeypatch.setattr(terminal, 'scrape_macrotrends',
+                        lambda t, m, freq='A': (calls.append(freq), {freq: 1.0})[1])
+    terminal._mt_cache.clear()
+    try:
+        assert terminal._mt_cached('AAPL', 'revenue', 'A') == {'A': 1.0}
+        assert terminal._mt_cached('AAPL', 'revenue', 'Q') == {'Q': 1.0}
+        assert calls == ['A', 'Q']
+        # ...and each is still cached in its own right.
+        terminal._mt_cached('AAPL', 'revenue', 'A')
+        terminal._mt_cached('AAPL', 'revenue', 'Q')
+        assert calls == ['A', 'Q']
+    finally:
+        terminal._mt_cache.clear()
+
+
 def test_a_failed_scrape_is_not_cached(monkeypatch):
     """Caching a transient failure would pin every chart to five years for six
     hours — the rule `_fetch_div_events` already follows."""
     calls = []
 
-    def flaky(tkkr, metric):
+    def flaky(tkkr, metric, freq='A'):
         calls.append(metric)
         if len(calls) == 1:
             raise OSError('connection reset')

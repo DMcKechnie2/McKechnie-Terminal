@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -555,18 +556,129 @@ def test_cache_serves_second_call_without_refetching(monkeypatch):
     assert d1 == d2
 
 
+def _age_stock_entry(tkkr, seconds):
+    """Push a cache entry `seconds` into the past."""
+    with terminal._stock_cache_lock:
+        terminal._stock_cache[tkkr]['ts'] -= seconds
+
+
+def _wait_for_background_refresh(timeout=5):
+    """Block until no ticker is mid-rebuild.
+
+    The refresh is deliberately off the request path, so a test that asserts on
+    its effect has to wait for it rather than assume it has landed.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with terminal._stock_cache_lock:
+            if not terminal._stock_inflight:
+                return True
+        time.sleep(0.01)
+    return False
+
+
 def test_cache_expires(monkeypatch):
+    """Past the stale window the caller waits for a fresh fetch, as before."""
     calls = []
     monkeypatch.setattr(terminal, '_do_get_stock',
                         lambda t: calls.append(t) or {'ticker': t})
     terminal._stock_cache.clear()
 
     terminal._cached_stock('TEST')
-    # Age the entry past the TTL.
-    terminal._stock_cache['TEST']['ts'] -= (terminal.STOCK_TTL + 1)
+    _age_stock_entry('TEST', terminal.STOCK_STALE_TTL + 1)
     terminal._cached_stock('TEST')
 
     assert len(calls) == 2
+
+
+def test_stale_entry_is_served_without_blocking(monkeypatch):
+    """Between STOCK_TTL and STOCK_STALE_TTL the caller must not pay for a rebuild.
+
+    This is the whole point of the SWR window: expiry used to be a cliff, and
+    whoever arrived first after ten minutes paid ~3s of Macrotrends scrapes and
+    a full yfinance walk on everyone else's behalf.
+    """
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def slow(tkkr):
+        calls.append(tkkr)
+        if len(calls) > 1:          # the background rebuild
+            started.set()
+            release.wait(timeout=5)
+        return {'ticker': tkkr, 'gen': len(calls)}
+
+    monkeypatch.setattr(terminal, '_do_get_stock', slow)
+    terminal._stock_cache.clear()
+
+    terminal._cached_stock('TEST')                      # gen 1, cold
+    _age_stock_entry('TEST', terminal.STOCK_TTL + 1)
+
+    t0 = time.time()
+    data, was_cached = terminal._cached_stock('TEST')
+    elapsed = time.time() - t0
+
+    # Returned the stale copy straight away, while the rebuild is still blocked.
+    assert was_cached is True
+    assert data['gen'] == 1
+    assert elapsed < 0.5
+    assert started.wait(timeout=5), 'no background refresh was started'
+
+    release.set()
+    assert _wait_for_background_refresh()
+    with terminal._stock_cache_lock:
+        assert terminal._stock_cache['TEST']['data']['gen'] == 2
+
+
+def test_stale_hits_start_only_one_background_refresh(monkeypatch):
+    """Ten stale reads are one rebuild, not ten."""
+    release = threading.Event()
+    calls = []
+
+    def slow(tkkr):
+        calls.append(tkkr)
+        if len(calls) > 1:
+            release.wait(timeout=5)
+        return {'ticker': tkkr}
+
+    monkeypatch.setattr(terminal, '_do_get_stock', slow)
+    terminal._stock_cache.clear()
+
+    terminal._cached_stock('TEST')
+    _age_stock_entry('TEST', terminal.STOCK_TTL + 1)
+    for _ in range(10):
+        terminal._cached_stock('TEST')
+
+    release.set()
+    assert _wait_for_background_refresh()
+    assert len(calls) == 2, f'expected 1 cold + 1 rebuild, got {len(calls)}'
+
+
+def test_failed_background_refresh_keeps_the_stale_entry(monkeypatch):
+    """A transient upstream failure must not evict a servable payload.
+
+    Dropping it would turn one bad rebuild into a cold fetch for the next
+    caller — exactly the cost this path exists to avoid.
+    """
+    calls = []
+
+    def flaky(tkkr):
+        calls.append(tkkr)
+        if len(calls) > 1:
+            raise RuntimeError('upstream down')
+        return {'ticker': tkkr, 'gen': 1}
+
+    monkeypatch.setattr(terminal, '_do_get_stock', flaky)
+    terminal._stock_cache.clear()
+
+    terminal._cached_stock('TEST')
+    _age_stock_entry('TEST', terminal.STOCK_TTL + 1)
+    terminal._cached_stock('TEST')
+    assert _wait_for_background_refresh()
+
+    data, was_cached = terminal._cached_stock('TEST')
+    assert (data['gen'], was_cached) == (1, True)
 
 
 def test_concurrent_requests_share_one_upstream_fetch(monkeypatch):
