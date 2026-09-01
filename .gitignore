@@ -14,10 +14,27 @@ app_secret.json
 # Password hashes and account records — never commit
 users.json
 
-# Generated report PDFs: large and rebuildable, and one per account per ticker.
-# The portfolio JSON under users/<name>/ stays tracked, matching how it was
-# tracked at the repo root before accounts existed.
-users/*/reports/
+# Every account's own data: the portfolio JSON (holdings and their lots,
+# sales, transactions, watchlist, theses, valuations), cached guidance, the
+# generated report PDFs, and settings.json with that account's API keys.
+# Real positions and a real trade history belong to the account holder and
+# not to the repo — they were tracked at the repo root before accounts
+# existed and stayed tracked through the move, which is the whole reason
+# this needed saying. The directory-per-user layout is what lets one line
+# cover every account that will ever exist.
+users/
+
+# Scraped index and exchange membership, refreshed daily and rebuildable from
+# Wikipedia and the venues' own listing files. Nobody's data and not portfolio
+# state — it is a cache that happens to be persisted so an upstream outage
+# cannot empty the page after a restart. Now ~850KB, since it holds every
+# listing on five exchanges as well as four index constituent lists.
+index_constituents.json
+
+# Share counts for the listings Yahoo reports no market cap for. Same character
+# as the file above: public market data, refreshed daily, rebuildable, and
+# persisted only so the fill survives a restart.
+share_counts.json
 
 # Local scratch output from the value screener
 value_screen_raw.json
