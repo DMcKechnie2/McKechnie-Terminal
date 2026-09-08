@@ -6839,8 +6839,15 @@ def report_file(ticker):
 # starts nothing, so a ticker looked up before shows instantly and for free.
 # Only POST .../run spends anything, and only the button reaches it.
 # ---------------------------------------------------------------------------
+#
+# A sibling directory by default, like StockBox. `FORWARD_GUIDE_DIR` overrides
+# it for a deployment where the sibling layout cannot be written to: the live
+# unit runs with ProtectHome=read-only and a fixed ReadWritePaths list, and
+# Forward Guide caches filings and results under its own `data/`, so on that
+# box it lives inside the app directory instead and `.env` says where.
 _FORWARD_GUIDE_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'Forward Guide')
+    os.environ.get('FORWARD_GUIDE_DIR')
+    or os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'Forward Guide')
 )
 
 # Keyed by the symbol the user asked about, not the filer Forward Guide

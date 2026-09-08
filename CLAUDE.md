@@ -25,6 +25,14 @@ Flask + vanilla JS stock fundamental analysis dashboard.
   subprocess (`report.py --tickers X --fetch --brief --json <path>`), never
   imported, so its dependencies stay out of this app's import graph. Its
   `--push` flag is deliberately unused here; see the guidance invariants below.
+  `FORWARD_GUIDE_DIR` overrides the location. The subprocess runs on
+  `sys.executable`, so its `requirements.txt` (only `anthropic` is not already
+  here) has to be installed into this app's venv wherever it is deployed. On the
+  live box it sits at `mckechnie-terminal/forward-guide` — inside the app
+  directory, because the service unit's `ReadWritePaths` covers that and not a
+  new sibling, and Forward Guide writes its filing cache under its own `data/`.
+  Ship it without `.env` (keys come from the account, via `_account_env`) and
+  without `data/` (a re-derivable cache).
 
 ## Running locally
 ```
