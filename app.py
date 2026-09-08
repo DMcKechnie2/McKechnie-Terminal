@@ -621,7 +621,8 @@ def index():
     html = render_template('index.html',
                            csrf_token=session.get('csrf', ''),
                            username=user.get('username', ''),
-                           is_admin=(user.get('role') == 'admin'))
+                           is_admin=(user.get('role') == 'admin'),
+                           is_guest=_is_guest(user))
     resp = app.make_response(html)
     # The shell carries the CSRF token and the signed-in username, so it must not
     # sit in the browser cache after sign-out. Observed: after switching accounts
@@ -4367,14 +4368,22 @@ def load_transactions(owner=None):
 def save_transactions(items, owner=None):
     _user_store(TRANSACTIONS_FILE, owner).save(items)
 
-def rebuild_holdings_from_transactions():
-    """Replay all transactions FIFO to rebuild holdings.json from scratch."""
+def rebuild_holdings_from_transactions(owner=None):
+    """Replay all transactions FIFO to rebuild holdings.json from scratch.
+
+    `owner` is for callers with no request — the guest seed runs from the CLI.
+    Inside a request it is left None and the account comes from the session,
+    the same rule every other per-user reader follows.
+    """
     from datetime import datetime as _dt
     def _parse(d):
         try: return _dt.strptime(d, '%Y-%m-%d')
         except Exception: return _dt.min
 
-    txns = sorted(load_transactions(), key=lambda t: (_parse(t.get('date', '')), t.get('id', '')))
+    # Positional when there is no owner, so the zero-argument doubles the
+    # ledger tests install for these loaders keep working.
+    txns = sorted(load_transactions(owner=owner) if owner else load_transactions(),
+                  key=lambda t: (_parse(t.get('date', '')), t.get('id', '')))
 
     positions = {}  # ticker -> {name, shares, avg_price, lots:[{shares,price,date}]}
     for t in txns:
@@ -4432,10 +4441,13 @@ def rebuild_holdings_from_transactions():
             'date_acquired': min(dates) if dates else '',
             'added':         '',
         })
-    save_holdings(holdings)
+    if owner:
+        save_holdings(holdings, owner=owner)
+    else:
+        save_holdings(holdings)
     return holdings
 
-def rebuild_sales_from_transactions():
+def rebuild_sales_from_transactions(owner=None):
     """Rewrite sales.json so it matches the transaction ledger exactly.
 
     sales.json is a denormalised view of the sell transactions: every field in it
@@ -4451,8 +4463,8 @@ def rebuild_sales_from_transactions():
     match for rows written before ids were stamped, then by the same match
     ignoring the date, since the date is what tended to be wrong. Only when all
     three miss is it derived FIFO from the oldest lot the sell consumed."""
-    txns  = load_transactions()
-    prior = load_sales()
+    txns  = load_transactions(owner=owner) if owner else load_transactions()
+    prior = load_sales(owner=owner)        if owner else load_sales()
 
     # Prior acquisition dates, indexed three ways. Lists, popped as they are
     # claimed, so two identical sells can't both inherit the same row.
@@ -4537,7 +4549,10 @@ def rebuild_sales_from_transactions():
             'gain_loss':     round((pr - wac) * sh, 4),
         })
 
-    save_sales(out)
+    if owner:
+        save_sales(out, owner=owner)
+    else:
+        save_sales(out)
     return out
 
 def _new_txn_id(existing_ids):
@@ -5785,6 +5800,47 @@ def _admin_count(users, excluding=None):
                and u.get('username') != excluding)
 
 
+# --- guest access -----------------------------------------------------------
+#
+# One shared, read-only account for people reviewing the project who have no
+# account of their own. It is an ordinary user record — same directory layout,
+# same gate, same session mechanics — with three differences, each of which is a
+# single check rather than a second code path:
+#
+#   * role is 'guest', and `_require_login` refuses every non-GET for that role
+#     except logout. Read-only is a property of the gate, not of the routes, for
+#     the same reason the gate itself is not a decorator: the mutating route you
+#     forget to mark is the one that lets a stranger rewrite the demo ledger
+#     everyone else is looking at.
+#   * password_hash is None, so the password form can never sign in as it —
+#     `_verify_password(None, ...)` is False — and the only way in is the button,
+#     which starts a session for it while it is enabled and 404s otherwise.
+#   * it has no API keys and cannot save any: a key saved into a shared account
+#     would be spent by every stranger who pressed the button.
+#
+# The switch is the existing `disabled` flag, so the Admin tab's Enable/Disable
+# control is the on/off toggle and disabling it ends every live guest session the
+# same way it does for anyone else. `python app.py guest enable` creates it.
+
+GUEST_USERNAME = 'guest'
+GUEST_ROLE     = 'guest'
+
+
+def _guest_record(users=None):
+    """The guest account's record, or None if it has never been enabled."""
+    u = _find_user(GUEST_USERNAME, users)
+    return u if u is not None and u.get('role') == GUEST_ROLE else None
+
+
+def _guest_enabled():
+    u = _guest_record()
+    return u is not None and not u.get('disabled')
+
+
+def _is_guest(user):
+    return bool(user) and user.get('role') == GUEST_ROLE
+
+
 def _current_user():
     """The signed-in user, or None.
 
@@ -5853,7 +5909,12 @@ def admin_required(fn):
 
 # The only endpoints reachable without a session. Everything else — including
 # every route added after this comment — is closed.
-_PUBLIC_ENDPOINTS = {'static', 'login_page', 'api_login'}
+_PUBLIC_ENDPOINTS = {'static', 'login_page', 'api_login', 'api_guest_login'}
+
+# The only non-GET endpoints a guest session may reach. Same shape as the set
+# above and for the same reason: a route added later is read-only for a guest
+# because it exists, and letting one write takes an explicit edit here.
+_GUEST_WRITABLE = {'api_logout'}
 
 _SAFE_METHODS = {'GET', 'HEAD', 'OPTIONS'}
 
@@ -5926,6 +5987,9 @@ _RATE_LIMITS = {
     # these are the routes where a plain loop is a memory-and-CPU DoS. The login
     # lockout above stops a *guessing* run; this stops the cost of one.
     'api_login':            (10, 10),
+    # No hash to pay for, but it mints a session per call and stamps the users
+    # file — priced like login so a loop on the button cannot do either freely.
+    'api_guest_login':      (10, 10),
     'api_change_password':   (5, 10),
     'admin_create_user':    (10, 20),
     'admin_update_user':    (20, 40),   # can reset a password, so it hashes too
@@ -6178,9 +6242,20 @@ def _require_login():
         return None                     # unrouted path: let Flask 404 it
     if endpoint in _PUBLIC_ENDPOINTS:
         return None
-    if _current_user() is None:
+    user = _current_user()
+    if user is None:
         return _auth_challenge()
-    return _check_csrf()
+    refusal = _check_csrf()
+    if refusal is not None:
+        return refusal
+    # A guest reads everything its own directory holds and writes none of it.
+    # Checked after CSRF so a forged cross-site write still gets the 403 that
+    # names the real reason; checked here rather than per route because there
+    # are ~40 mutating routes and the one without the check would be the hole.
+    if _is_guest(user) and request.method not in _SAFE_METHODS \
+            and endpoint not in _GUEST_WRITABLE:
+        return jsonify({'error': 'Guest access is read-only.', 'guest': True}), 403
+    return None
 
 
 # --- login / logout -------------------------------------------------------
@@ -6252,7 +6327,49 @@ def login_page():
     if _current_user() is not None:
         return redirect(_safe_next(request.args.get('next')))
     return render_template('login.html',
-                           next_url=_safe_next(request.args.get('next')))
+                           next_url=_safe_next(request.args.get('next')),
+                           guest_enabled=_guest_enabled())
+
+
+@app.route('/api/auth/guest', methods=['POST'])
+def api_guest_login():
+    """Open a session on the shared guest account, if one is enabled.
+
+    Public, like api_login, because it *is* a login. 404 rather than 403 when
+    there is no enabled guest: the button that calls this is only rendered when
+    there is one, so a caller reaching it otherwise is probing, and there is
+    nothing here to be forbidden from.
+    """
+    guest = _guest_record()
+    if guest is None or guest.get('disabled'):
+        return jsonify({'error': 'Guest access is not enabled.'}), 404
+
+    _start_session(guest)
+
+    # Every guest login lands on the demo book. Normally a read that finds
+    # nothing to do — a guest cannot write — but if the directory has drifted
+    # by any other route it is put back before this visitor sees it.
+    try:
+        if _guest_portfolio_drifted():
+            _seed_guest_portfolio(force=True)
+            print('[AUTH] guest portfolio had drifted; reset on login', flush=True)
+    except Exception as e:
+        print(f'[AUTH] guest portfolio reset failed: {e}', flush=True)
+
+    def _stamp(users):
+        for u in users:
+            if u.get('username') == GUEST_USERNAME:
+                u['last_login'] = _now_iso()
+        return users
+
+    try:
+        _users_store.mutate(_stamp)
+    except Exception:
+        pass        # bookkeeping; must not be able to fail the sign-in
+
+    print(f'[AUTH] guest login from {request.remote_addr}', flush=True)
+    return jsonify({'ok': True, 'user': _public_user(guest),
+                    'csrf_token': session['csrf']})
 
 
 @app.route('/api/auth/login', methods=['POST'])
@@ -6441,6 +6558,14 @@ def admin_update_user(username):
         target = _find_user(name, users)
         if target is None:
             error['msg'], error['code'] = 'Unknown user.', 404
+            return users
+        # The guest account has no password to reset and no role to change:
+        # promoting it makes a passwordless account with write access, and
+        # giving it a password makes the password form a second door into the
+        # shared demo. Enable/disable is the whole of its administration.
+        if target.get('role') == GUEST_ROLE and (role is not None or new_pw is not None):
+            error['msg'] = 'The guest account can only be enabled or disabled.'
+            error['code'] = 400
             return users
         # Locking yourself out is the one mistake this UI can make that no
         # amount of clicking undoes, so the last enabled admin cannot be
@@ -8704,6 +8829,191 @@ def _backfill_transaction_gains(owner):
         save_transactions(txns, owner=owner)
 
 
+# --- the guest's demo portfolio ---------------------------------------------
+#
+# A reviewer who signs in as guest and finds an empty Holdings tab has seen the
+# login form and nothing else, so the guest directory is seeded with a small
+# illustrative ledger on real listings. Real symbols, so every quote, dividend
+# and chart resolves live; invented trades, because the account holder's own
+# portfolio is theirs. Only transactions.json and watchlist.json are written —
+# holdings and sales are derived, here as everywhere, by the two rebuilds.
+#
+# Canadian listings for the book, because the portfolio formatters print the
+# account's own money as `$` and a CAD book keeps every total in one currency.
+# US names on the watchlist, because that is where the forty-year Macrotrends
+# charts are — a `.TO` symbol skips the scrape.
+
+_GUEST_LEDGER = [
+    # (date, type, ticker, name, shares, price)
+    ('2025-09-15', 'buy',  'T.TO',    'TELUS Corporation',               120, 21.80),
+    ('2025-09-22', 'buy',  'BCE.TO',  'BCE Inc.',                         50, 32.40),
+    ('2025-10-01', 'buy',  'XEQT.TO', 'iShares Core Equity ETF Portfolio', 80, 36.90),
+    ('2025-10-06', 'buy',  'ENB.TO',  'Enbridge Inc.',                    60, 64.25),
+    ('2025-11-12', 'buy',  'RY.TO',   'Royal Bank of Canada',             25, 172.40),
+    ('2025-11-20', 'buy',  'AAPL.TO', 'Apple CDR (CAD Hedged)',           40, 33.10),
+    ('2025-12-02', 'buy',  'CNR.TO',  'Canadian National Railway',        15, 148.60),
+    ('2026-01-20', 'buy',  'SHOP.TO', 'Shopify Inc.',                     12, 198.50),
+    ('2026-02-10', 'buy',  'MSFT.TO', 'Microsoft CDR (CAD Hedged)',       30, 41.75),
+    ('2026-03-04', 'buy',  'RY.TO',   'Royal Bank of Canada',             10, 181.10),
+    ('2026-04-14', 'sell', 'BCE.TO',  'BCE Inc.',                         50, 35.10),
+]
+
+_GUEST_WATCHLIST = [
+    ('AAPL',  'Apple Inc.'),
+    ('MSFT',  'Microsoft Corporation'),
+    ('NVDA',  'NVIDIA Corporation'),
+    ('COST',  'Costco Wholesale Corporation'),
+    ('BRK-B', 'Berkshire Hathaway Inc.'),
+]
+
+
+def _guest_txn_id(date, n):
+    """An id whose millisecond prefix is the trade date, so the lexicographic
+    order `_new_txn_id` promises still matches chronology on seeded rows."""
+    ms = int(_datetime.strptime(date, '%Y-%m-%d')
+             .replace(tzinfo=_timezone.utc).timestamp() * 1000)
+    return f'{ms}-{n:06x}'
+
+
+def _guest_seed_rows():
+    """The ledger exactly as the seed stores it: newest first, like the routes."""
+    rows = []
+    for n, (date, kind, ticker, name, shares, price) in enumerate(_GUEST_LEDGER):
+        rows.append({'id': _guest_txn_id(date, n), 'type': kind, 'ticker': ticker,
+                     'name': name, 'shares': float(shares), 'price': float(price),
+                     'date': date})
+    rows.reverse()
+    return rows
+
+
+def _guest_seed_watchlist():
+    return [{'ticker': t, 'name': n, 'added': _GUEST_LEDGER[0][0]}
+            for t, n in _GUEST_WATCHLIST]
+
+
+# What the seed writes. Everything else registered in _PER_USER_FILES — options,
+# valuations, blocked, guidance, settings — is absent from a clean guest
+# directory, and a reset removes it rather than leaving it to be found later.
+_GUEST_SEED_FILES = ('transactions.json', 'watchlist.json',
+                     'holdings.json', 'sales.json')
+
+
+def _guest_stray_paths(owner=GUEST_USERNAME):
+    """Files in the guest directory that a clean seed never writes."""
+    d = _user_data_dir(owner)
+    out = [os.path.join(d, name) for name in _PER_USER_FILES
+           if name not in _GUEST_SEED_FILES and os.path.exists(os.path.join(d, name))]
+    reports = os.path.join(d, 'reports')
+    if os.path.isdir(reports):
+        out.append(reports)
+    return out
+
+
+def _guest_portfolio_drifted(owner=GUEST_USERNAME):
+    """True when the guest directory is not exactly what the seed produces.
+
+    The gate already makes a guest write impossible, so on a healthy server this
+    answers False on every login and costs four small reads. It exists for the
+    cases the gate cannot see — a file edited by hand on the box, a corrupt
+    file, or a mutating route that some future change lets through — so that
+    the next visitor still lands on the demo book and not on whatever the last
+    one left. A read that raises counts as drift: a corrupt ledger is the one
+    case where reseeding is unambiguously right.
+    """
+    try:
+        if load_transactions(owner=owner) != _guest_seed_rows():
+            return True
+        if load_watchlist(owner=owner) != _guest_seed_watchlist():
+            return True
+        bought = {t for _, k, t, *_ in _GUEST_LEDGER if k == 'buy'}
+        sold   = {t for _, k, t, *_ in _GUEST_LEDGER if k == 'sell'}
+        if {h.get('ticker') for h in load_holdings(owner=owner)} != bought - sold:
+            return True
+        if len(load_sales(owner=owner)) != len(sold):
+            return True
+    except Exception:
+        return True
+    return bool(_guest_stray_paths(owner))
+
+
+def _seed_guest_portfolio(owner=GUEST_USERNAME, force=False):
+    """Write the demo ledger into `owner`'s directory and derive the rest.
+
+    Skipped when the ledger already has rows unless `force`, so enabling guest
+    access twice does not reset what is there. With `force` the directory is
+    returned to exactly the seed: stray per-user files and any reports are
+    removed first, so `guest reset` and the drift check on login both mean the
+    same thing. Returns True if it wrote.
+    """
+    if load_transactions(owner=owner) and not force:
+        return False
+    if force:
+        for path in _guest_stray_paths(owner):
+            if os.path.isdir(path):
+                _shutil.rmtree(path, ignore_errors=True)
+            else:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+    save_transactions(_guest_seed_rows(), owner=owner)
+    save_sales([], owner=owner)          # a reset must not inherit stale sale rows
+    save_watchlist(_guest_seed_watchlist(), owner=owner)
+    rebuild_holdings_from_transactions(owner=owner)
+    rebuild_sales_from_transactions(owner=owner)
+    return True
+
+
+def enable_guest_access():
+    """Create the guest account if needed, enable it, seed it if empty.
+
+    Returns (created, seeded). Raises ValueError if the name is taken by a real
+    account — a person called 'guest' must not silently become the demo.
+    """
+    created = {}
+
+    def _apply(users):
+        existing = _find_user(GUEST_USERNAME, users)
+        if existing is not None and existing.get('role') != GUEST_ROLE:
+            raise ValueError(f'"{GUEST_USERNAME}" is an ordinary account; '
+                             f'rename or delete it before enabling guest access.')
+        if existing is None:
+            record = {
+                'username':      GUEST_USERNAME,
+                'password_hash': None,      # no password: the button is the only door
+                'role':          GUEST_ROLE,
+                'disabled':      False,
+                'created_at':    _now_iso(),
+                'last_login':    None,
+                'token_version': 1,
+            }
+            created.update(record)
+            return users + [record]
+        existing['disabled'] = False
+        return users
+
+    _users_store.mutate(_apply)
+    seeded = _seed_guest_portfolio()
+    return bool(created), seeded
+
+
+def disable_guest_access():
+    """Disable the guest account and end every live guest session. Returns
+    False if there is no guest account to disable."""
+    found = []
+
+    def _apply(users):
+        for u in users:
+            if u.get('username') == GUEST_USERNAME and u.get('role') == GUEST_ROLE:
+                u['disabled'] = True
+                u['token_version'] = int(u.get('token_version', 1)) + 1
+                found.append(u)
+        return users
+
+    _users_store.mutate(_apply)
+    return bool(found)
+
+
 def _prompt_new_account(role):
     """Interactively create an account. Returns the username, or None if aborted.
 
@@ -8811,8 +9121,46 @@ def _cli(argv):
         print(f'Password updated for "{name}". Other sessions have been signed out.')
         return 0
 
+    if cmd == 'guest':
+        # Guest access for reviewers. `enable` is idempotent; `reset` puts the
+        # demo portfolio back — visitors cannot change it, but the account
+        # holder can edit _GUEST_LEDGER and reseed.
+        sub = argv[1] if len(argv) > 1 else 'status'
+        if sub == 'enable':
+            try:
+                created, seeded = enable_guest_access()
+            except ValueError as e:
+                print(str(e))
+                return 1
+            print(f'Guest access {"created and " if created else ""}enabled'
+                  f'{" with a demo portfolio" if seeded else ""}. The login page '
+                  f'now shows a "Continue as guest" button.')
+            return 0
+        if sub == 'disable':
+            if not disable_guest_access():
+                print('There is no guest account.')
+                return 1
+            print('Guest access disabled. Live guest sessions have been signed out.')
+            return 0
+        if sub == 'reset':
+            if _guest_record() is None:
+                print('There is no guest account. Run:  python app.py guest enable')
+                return 1
+            _seed_guest_portfolio(force=True)
+            print('Guest demo portfolio reset.')
+            return 0
+        if sub == 'status':
+            g = _guest_record()
+            state = ('not created' if g is None
+                     else 'disabled' if g.get('disabled') else 'enabled')
+            print(f'Guest access: {state}')
+            return 0
+        print('Usage: python app.py guest [enable|disable|reset|status]')
+        return 1
+
     print(f'Unknown command: {cmd}\n'
-          f'Usage: python app.py [create-admin|create-user|list-users|passwd <user>]')
+          f'Usage: python app.py [create-admin|create-user|list-users|passwd <user>'
+          f'|guest enable|disable|reset|status]')
     return 1
 
 

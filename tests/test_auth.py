@@ -148,7 +148,8 @@ def test_every_route_is_closed_unless_explicitly_public():
     This fails whenever an endpoint is added to _PUBLIC_ENDPOINTS, which is the
     intent: opening a route to the internet should not pass unnoticed.
     """
-    assert terminal._PUBLIC_ENDPOINTS == {'static', 'login_page', 'api_login'}
+    assert terminal._PUBLIC_ENDPOINTS == {'static', 'login_page', 'api_login',
+                                          'api_guest_login'}
 
 
 @pytest.mark.parametrize('path', [

@@ -6,6 +6,7 @@
 <meta name="csrf-token" content="{{ csrf_token }}">
 <meta name="current-user" content="{{ username }}">
 <meta name="is-admin" content="{{ '1' if is_admin else '0' }}">
+<meta name="is-guest" content="{{ '1' if is_guest else '0' }}">
 <title>McKechnie Terminal</title>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -291,6 +292,17 @@ body::before {
 .icon-btn svg { width: 17px; height: 17px; fill: var(--muted); transition: fill 0.15s; }
 .icon-btn:hover svg { fill: var(--text); }
 .icon-btn.active svg { fill: var(--on-accent); }
+
+/* Rendered for a guest session only. It says what the 403s on every write are
+   about before the first one happens, and it sits by the gear because that is
+   where the account is. Same pill shape as Settings' status pills. */
+.guest-pill {
+  align-self: center; flex-shrink: 0;
+  font-size: var(--fs-0); font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; white-space: nowrap;
+  padding: 4px 9px; border-radius: var(--r-sm);
+  background: var(--warn-wash); color: var(--warn);
+}
 
 .mainnav {
   display: flex;
@@ -3275,6 +3287,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
      third row of its own. From zero it always fits, then grows into whatever
      the other two leave. */
   .search-row    { order: 2; width: auto; flex: 1 1 0; min-width: 0; margin-left: 0; }
+  .guest-pill    { order: 3; }
   .icon-btn      { order: 3; }
   .mainnav       { order: 4; width: 100%; margin-top: 0; }
   .navlink       { padding: 10px 11px; }
@@ -3532,6 +3545,9 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
       <button id="searchBtn" class="search-btn">Search</button>
     </div>
 
+{%- if is_guest %}
+    <span class="guest-pill" title="You are signed in as the shared guest account. Everything is viewable; nothing can be changed.">Guest · read-only</span>
+{%- endif %}
     <button class="icon-btn" id="settingsBtn" title="Settings" onclick="goSettings()">
       <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.02 7.02 0 0 0-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.47.47 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.47.47 0 0 0-.12-.61l-2.01-1.58zM12 15.6a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2z"/></svg>
     </button>
@@ -3929,6 +3945,16 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
         <button class="settings-btn" onclick="signOut()">Sign Out</button>
       </div>
     </div>
+{%- if is_guest %}
+
+    <!-- A guest has no password to change and no keys to hold, so neither
+         form is in the document — the same call as the Admin tab: not a check
+         (the gate refuses every write for this role) but no door shipped to
+         someone who cannot open it. -->
+    <div class="settings-panel">
+      <div class="settings-key-note">You are viewing the shared guest account. It is read-only: every page and chart works, and nothing you do here is saved or visible to anyone else. Password and API-key settings belong to a real account.</div>
+    </div>
+{%- else %}
 
     <div class="settings-panel">
       <div class="settings-form">
@@ -4070,6 +4096,7 @@ body.light .bn-badge          { background: rgba(220,38,38,0.10); }
       <button class="settings-btn primary" onclick="saveSettings()">Save Keys</button>
       <span class="settings-status" id="settings-status"></span>
     </div>
+{%- endif %}
 
   </div><!-- end settings-page -->
 
@@ -5321,6 +5348,7 @@ const AUTH = {
   csrf:    document.querySelector('meta[name="csrf-token"]')?.content || '',
   user:    document.querySelector('meta[name="current-user"]')?.content || '',
   isAdmin: document.querySelector('meta[name="is-admin"]')?.content === '1',
+  isGuest: document.querySelector('meta[name="is-guest"]')?.content === '1',
 };
 
 // ── Request coalescing ──────────────────────────────────────────────────────
@@ -5431,9 +5459,29 @@ function apiGet(url, { ttl = 0, force = false } = {}) {
       // renders as a panel that is empty for no visible reason. The server
       // sends Retry-After, so say how long rather than "try again later".
       if (sameOrigin && res.status === 429) noteRateLimited(res.headers.get('Retry-After'));
+      // A guest's write is refused by the gate with `guest: true`. Say so in
+      // the status line, for the same reason as the two above: every Save and
+      // Add on the page otherwise reads as a button that did nothing. The body
+      // is read off a clone so the caller still gets its own copy.
+      if (sameOrigin && res.status === 403 && AUTH.isGuest) {
+        res.clone().json().then(d => { if (d && d.guest) noteGuestReadOnly(); }).catch(() => {});
+      }
       return res;
     });
   };
+
+  function noteGuestReadOnly() {
+    const el = document.getElementById('status');
+    if (!el) return;
+    el.textContent = 'Guest access is read-only — sign in to an account to make changes.';
+    el.className = 'status error';
+    setTimeout(() => {
+      if (el.textContent.startsWith('Guest access')) {
+        el.textContent = '';
+        el.className = 'status';
+      }
+    }, 5000);
+  }
 
   // A burst is refused as a burst — every call in flight comes back 429 at once
   // — so the notice is throttled or one click writes it twenty times.
@@ -11498,7 +11546,7 @@ function _flashStatus(id, msg, ok = true) {
 function loadAccount() {
   document.getElementById('acct-who').textContent = AUTH.user;
   document.getElementById('acct-role').textContent =
-    AUTH.isAdmin ? 'Administrator' : 'User';
+    AUTH.isAdmin ? 'Administrator' : AUTH.isGuest ? 'Guest' : 'User';
 }
 
 async function changePassword() {
@@ -11564,7 +11612,8 @@ async function loadUsers() {
 
     box.innerHTML = users.map(u => {
       const name = escHtml(u.username);
-      const role = u.role === 'admin' ? 'Administrator' : 'User';
+      const role = u.role === 'admin' ? 'Administrator'
+                 : u.role === 'guest' ? 'Guest' : 'User';
       const last = u.last_login ? new Date(u.last_login).toLocaleDateString() : '—';
       const self = u.username === AUTH.user;
       return `

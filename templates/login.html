@@ -151,6 +151,26 @@ button:disabled { opacity: .5; cursor: default; }
   text-align: center;
 }
 
+/* The guest door. Rendered only when the server says a guest account is
+   enabled, so a visitor to a deployment without one sees the form above and
+   nothing else. Secondary weight — it is the way in for someone *reviewing*
+   the project, and the primary control stays the sign-in for whoever owns it. */
+.or {
+  display: flex; align-items: center; gap: 10px;
+  margin: 18px 0 14px;
+  font-size: 10px; color: var(--muted);
+  letter-spacing: 0.12em; text-transform: uppercase;
+}
+.or::before, .or::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+button.guest {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+button.guest:hover:not(:disabled) { background: var(--surface2); border-color: var(--muted); }
+.guest-note { margin-top: 8px; font-size: 11px; color: var(--muted); text-align: center; line-height: 1.5; }
+
 /* Phone. The card is already `width: 100%; max-width: 380px`, so the layout
    needs nothing — but the inputs do. iOS zooms the viewport whenever a focused
    field's text is under 16px and does not zoom back out, and this is the one
@@ -191,6 +211,12 @@ button:disabled { opacity: .5; cursor: default; }
     </div>
     <button type="submit" id="submitBtn">Sign in</button>
   </form>
+{%- if guest_enabled %}
+
+  <div class="or">or</div>
+  <button type="button" class="guest" id="guestBtn">Continue as guest</button>
+  <div class="guest-note">A read-only tour with a sample portfolio. Nothing you do is saved.</div>
+{%- endif %}
 
   <div class="foot">Accounts are created by an administrator.</div>
 </div>
@@ -242,6 +268,32 @@ form.addEventListener('submit', async (e) => {
   document.getElementById('password').value = '';
   btn.disabled = false;
   btn.textContent = 'Sign in';
+});
+
+// Same shape as the form above: one POST, then the same redirect. The button
+// is absent from the document when the server rendered no guest, so the
+// listener is guarded rather than the element assumed.
+const guestBtn = document.getElementById('guestBtn');
+if (guestBtn) guestBtn.addEventListener('click', async () => {
+  errBox.style.display = 'none';
+  guestBtn.disabled = true;
+  guestBtn.textContent = 'Opening...';
+  try {
+    const res = await fetch('/api/auth/guest', {
+      method: 'POST',
+      credentials: 'same-origin',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      location.href = NEXT;
+      return;
+    }
+    showError(data.error || 'Guest access is unavailable.');
+  } catch (err) {
+    showError('Could not reach the server.');
+  }
+  guestBtn.disabled = false;
+  guestBtn.textContent = 'Continue as guest';
 });
 </script>
 

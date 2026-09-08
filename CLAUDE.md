@@ -37,6 +37,13 @@ pytest -m network            # live Yahoo Finance smoke tests
 path; there is no email reset, so `passwd` is the only way back in after a
 forgotten admin password.
 
+```
+python app.py guest enable    # "Continue as guest" on the login page, seeded demo portfolio
+python app.py guest disable   # hides the button and signs out every live guest
+python app.py guest reset     # puts the demo portfolio back
+python app.py guest status
+```
+
 ## Invariants — do not regress these
 
 **The gate is deny-by-default, and it is not a decorator.**
@@ -108,6 +115,55 @@ bucket and the 448th request pays for the first, surfacing as an unrelated test
 going red once somebody adds a few more. Same rule as the auth bypass: it lives
 entirely in test code, and `app.py` has no flag that disables the limiter.
 `tests/test_rate_limit.py` is the file that opts back in and drives it.
+
+**Guest access is one shared account, and read-only is a property of the gate.**
+`python app.py guest enable` creates a user record named `guest` with role
+`guest` and **no password hash**, so the password form can never open it —
+`_verify_password(None, ...)` is False, one message, same timing — and the only
+way in is `POST /api/auth/guest`, the fourth entry in `_PUBLIC_ENDPOINTS`, which
+starts a session while the record is enabled and answers 404 otherwise. The
+login page renders the "Continue as guest" button only when `_guest_enabled()`,
+so a deployment without one shows the form and nothing else. The switch is the
+existing `disabled` flag: the Admin tab's Enable/Disable is the on/off control,
+and disabling bumps `token_version`, which ends every live guest session the
+same way it does for anyone else. `admin_update_user` refuses a role change or
+a password reset on it — a promoted guest is a passwordless account with write
+access, and a guest with a password is a second door into the shared demo.
+
+A guest reads everything in its own directory and writes none of it, and that
+rule lives in `_require_login` — after the CSRF check, before the route — as
+`_GUEST_WRITABLE`, a set holding `api_logout` alone. Same shape and same
+argument as `_PUBLIC_ENDPOINTS`: there are ~40 mutating routes, several
+strangers share the account at once, and the route you forgot to mark is the
+one that lets a visitor rewrite the demo everyone else is looking at or paste an
+API key that every later visitor would spend. The refusal is a 403 carrying
+`guest: true`, which the `fetch` wrapper turns into a status-line notice for the
+same reason it surfaces 401 and 429; the template also drops the password form
+and the key cards for a guest (`{% if is_guest %}`), which is not the check but
+a door not shipped. `tests/test_guest.py` walks the url_map and asserts every
+non-GET `/api/` route refuses a guest.
+
+The guest's portfolio is `_GUEST_LEDGER`, invented trades on real Canadian
+listings, written by `_seed_guest_portfolio()` into `users/guest/` as
+`transactions.json` and `watchlist.json` only — holdings and sales come from
+the two rebuilds, which take `owner=` for this (the seed runs from the CLI, with
+no request). `enable` seeds only an empty ledger; `reset` returns the directory
+to exactly the seed — stray per-user files and any `reports/` removed, then the
+four seed files rewritten. It has no `settings.json`, so every LLM path degrades
+the way an account with no key already does, and Report and Guidance are POSTs
+the gate refuses before a subprocess starts.
+
+**Every guest login lands on the demo book, and on a healthy server that is a
+read.** `api_guest_login` calls `_guest_portfolio_drifted()` — four small reads
+compared against what the seed produces, plus a check for files the seed never
+writes — and reseeds with `force=True` only when they differ. The gate already
+makes a guest write impossible, so this fires for what the gate cannot see: a
+file edited by hand on the box, a corrupt file (a read that raises counts as
+drift), or a mutating route some later change lets through. It is deliberately
+*not* an unconditional rewrite on login: several reviewers share the account at
+once, and rewriting four files under a concurrent reader for no reason is a
+blank panel waiting to happen. A test pins the mtime of an untouched ledger
+across a login.
 
 **Per-user data is separated by directory, not by an `owner` column.**
 Every portfolio file lives at `<data dir>/users/<username>/<file>.json` and is
