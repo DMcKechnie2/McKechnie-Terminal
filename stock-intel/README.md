@@ -28,7 +28,7 @@ Claude Code):
     "stock-intel": {
       "command": "python",
       "args": ["-m", "stock_intel.server"],
-      "cwd": "C:/Users/dylan/OneDrive/Desktop/McKechnie Terminal/stock-intel"
+      "cwd": "/path/to/McKechnie Terminal/stock-intel"
     }
   }
 }

@@ -9,6 +9,7 @@ test_live.py behind the `network` marker.
 """
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -1041,12 +1042,27 @@ def test_server_does_not_bind_all_interfaces_by_default():
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Vendor-prefixed key formats. Each requires a long secret body after the
-# prefix, so the patterns below do not match their own source text.
+# prefix, so the patterns below do not match their own source text. The body is
+# captured because the scan now judges it — see _KEY_PLACEHOLDER_RE.
 _SECRET_PATTERNS = (
-    ('Groq',      r'gsk_[A-Za-z0-9]{20,}'),
-    ('Anthropic', r'sk-ant-[A-Za-z0-9\-_]{20,}'),
-    ('OpenAI-compatible (DeepSeek etc.)', r'sk-[A-Za-z0-9]{24,}'),
+    ('Groq',      r'gsk_([A-Za-z0-9]{20,})'),
+    ('Anthropic', r'sk-ant-([A-Za-z0-9\-_]{20,})'),
+    ('OpenAI-compatible (DeepSeek etc.)', r'sk-([A-Za-z0-9]{24,})'),
 )
+
+# A body spelled as words, which is what a fixture looks like and what a
+# generated key cannot be. `sk-ant-belongs-to-this-account` is the fixture in
+# test_guidance.py proving an account's key beats one exported in the shell; it
+# shipped with the guidance panel and this scan has failed on it ever since, naming the test
+# that documents the rule as the leak. Same call the `%VAR%` skip below makes,
+# and for the reason that docstring gives: a scan that cries wolf gets deleted.
+#
+# Narrow deliberately. A vendor body is base62 and carries digits, so it cannot
+# be spelled as separator-joined alphabetic words — and requiring a separator is
+# what stops this from exempting a 24-character all-letter body, which a real
+# key reaches about one time in seventy. Judged per *match*, so a real key
+# sitting in a file beside a placeholder is still reported.
+_KEY_PLACEHOLDER_RE = re.compile(r'[A-Za-z]+(?:[-_][A-Za-z]+)+')
 
 
 def _tracked_text_files():
@@ -1077,13 +1093,35 @@ def _tracked_text_files():
 
 def test_no_tracked_file_contains_a_vendor_api_key():
     """A committed key is a published key, whether or not the repo is public."""
-    import re
     found = []
     for rel, text in _tracked_text_files():
         for vendor, pattern in _SECRET_PATTERNS:
-            if re.search(pattern, text):
+            if any(not _KEY_PLACEHOLDER_RE.fullmatch(m.group(1))
+                   for m in re.finditer(pattern, text)):
                 found.append(f'{rel}: looks like a {vendor} key')
     assert not found, 'secret committed to the repo:\n  ' + '\n  '.join(found)
+
+
+def test_the_placeholder_exemption_is_not_a_hole():
+    """The skip is only safe while it stays narrower than a real key, so it is
+    pinned from both sides — the fixtures it exists for stay exempt, and a key
+    in each vendor's own shape is still caught.
+
+    The keys below are built by concatenation because this file is tracked too:
+    written whole they would be real matches, and the scan above would report
+    its own regression test as the leak.
+    """
+    for body in ('belongs-to-this-account', 'EXPORTED-IN-THE-SHELL'):
+        assert _KEY_PLACEHOLDER_RE.fullmatch(body), f'fixture {body} not exempt'
+
+    for text in ('sk-ant-' + 'api03-J8x2QwErTyUiOpAsDfGhJkLzXcVbNm',
+                 'gsk_' + '9aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789',
+                 'sk-' + '1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d'):
+        bodies = [m.group(1) for _vendor, pattern in _SECRET_PATTERNS
+                  for m in re.finditer(pattern, text)]
+        assert bodies, f'{text[:7]} matches no vendor pattern at all'
+        assert not any(_KEY_PLACEHOLDER_RE.fullmatch(b) for b in bodies), (
+            f'{text[:7]} would be exempted as a placeholder')
 
 
 def test_no_tracked_file_sets_a_settings_key_in_the_environment():
@@ -1139,16 +1177,16 @@ def perf_ledger(monkeypatch):
 def test_performance_ignores_sales_records_with_no_transaction(perf_ledger):
     """Deleting a fat-fingered sell rebuilds holdings but leaves its row in
     sales.json. The tab counted that phantom trade's loss forever — a $1 sale of
-    157 shares showed as a five-figure realized loss that no longer existed."""
+    150 shares showed as a four-figure realized loss that no longer existed."""
     txns = [
         {'id': '1', 'type': 'buy',  'ticker': 'LULU.TO', 'name': 'Lululemon',
          'shares': 100.0, 'price': 10.0, 'date': '2026-01-15'},
     ]
     holdings = [{'ticker': 'LULU.TO', 'name': 'Lululemon', 'shares': 100.0,
                  'avg_price': 10.0, 'date_acquired': '2026-01-15'}]
-    stale = [{'ticker': 'LULU.TO', 'name': 'Lululemon', 'shares_sold': 157.5821,
-              'avg_cost': 8.7207, 'sale_price': 1.0, 'sale_date': '2026-05-30',
-              'date_acquired': '2026-01-15', 'gain_loss': -1216.6441}]
+    stale = [{'ticker': 'LULU.TO', 'name': 'Lululemon', 'shares_sold': 150.0,
+              'avg_cost': 9.0, 'sale_price': 1.0, 'sale_date': '2026-05-30',
+              'date_acquired': '2026-01-15', 'gain_loss': -1200.0}]
 
     pos = perf_ledger(txns, holdings, stale)['LULU.TO']
     assert pos['realized_pl']     == 0.0

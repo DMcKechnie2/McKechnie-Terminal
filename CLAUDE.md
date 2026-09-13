@@ -551,9 +551,9 @@ higher, and the old average survives nowhere else.
 `/api/portfolio/performance` read `sales.json` directly and was the only route
 that did. DELETE and PUT on a transaction rebuild holdings but wrote nothing to
 that file, so a deleted trade or a corrected fat-fingered price kept its original
-gain: the file had drifted $5,872 (six phantom rows, four of them "sold at $1.00")
-and the Performance tab reported −$4,136 realized while every other tab showed
-+$1,736. If you add a route that writes `transactions.json`, it must call **both**
+gain: the file had drifted by thousands of dollars (six phantom rows, four of
+them "sold at $1.00") and the Performance tab reported a four-figure realized
+loss while every other tab showed a four-figure gain. If you add a route that writes `transactions.json`, it must call **both**
 rebuilds.
 
 `date_acquired` is the one field on a sale row that the ledger cannot recompute —
@@ -565,11 +565,12 @@ by `txn_id`, so stamp that on any new sale row.
 bare millisecond stamp collided. `/api/portfolio/invested` and
 `/api/holdings/chart` both parsed it with `int()` inside a bare
 `except Exception: pass`, so every transaction recorded since that change
-vanished from their walks — three buys worth $2,403.69 at the time, and all of
-them going forward. The shares still reached `holdings.json` (rebuilt by a
+vanished from their walks — three buys at the time, and all of them going
+forward. The shares still reached `holdings.json` (rebuilt by a
 different path), so their market value counted toward funds while the capital
 that bought them never counted toward `invested`: the Holdings tab reported the
-difference as profit, +13.28% against a true +8.97%. Sort on the string; the
+difference as profit — more than four points of return that did not exist.
+Sort on the string; the
 ms-timestamp prefix makes lexicographic order match numeric, which is what
 `rebuild_holdings_from_transactions()` already relies on.
 
@@ -579,7 +580,7 @@ yfinance reports one date per distribution, so `_build_div_events` falls back to
 priority 0 and the ex-date snapshot it reads at priority 2, so on a shared date
 the credit ran first, missed the snapshot and defaulted to **0 shares** —
 dropping the distribution outright. T.TO, UNH.TO and ZMMK.TO have `pay == ex` on
-every distribution and credited exactly nothing ($64.40). The pay event now
+every distribution and credited exactly nothing. The pay event now
 sorts last when `pay == ex`; a dividend paid on its own ex-date cannot fund an
 earlier same-day buy anyway. `/api/holdings/chart` has the same ordering but
 falls back to pre-trade positions instead of 0, so it was unaffected — keep that
@@ -593,9 +594,10 @@ Those two identities are the cheapest regression check on this whole area.
 basis.** Both tabs report a portfolio-level return, and they used to compute
 "how much did I put in" separately: Holdings against external capital, Performance
 against `Σ (cost_basis_sold + held_cost)`. That sum re-books a dollar on every lap
-it makes — $68,655 of "invested" under a book that took $24,556 of real money,
-with a money-market parking round-trip alone accounting for 23% of it. The two
-tabs printed +13.28% and +2.87% for one portfolio on one day.
+it makes — the "invested" figure came to nearly three times the external capital
+the book had actually taken in, with a money-market parking round-trip alone
+accounting for 23% of it. The two tabs disagreed by more than ten points of
+return for one portfolio on one day.
 
 `_compute_invested()` is now the single source of that number and rides on the
 `/api/portfolio/performance` payload, so the Performance tab cannot drift from
@@ -604,8 +606,9 @@ denominator — it is the capital that position consumed — so the per-box
 percentages keep using it; only the summary divides by external capital.
 
 Performance also counts dividends now (`_dividends_received_by_ticker()`), which
-Holdings always did. Income changes the sign on real positions: T.TO reads
-+$3.45 rather than −$34.01 once its $37.46 of dividends is counted.
+Holdings always did. Income changes the sign on real positions: a Telus position
+that reads a small loss on price alone reads a small gain once a year of
+dividends is counted.
 
 `_dividend_payments()` is the one walk behind both the Dividends tab and this,
 for the same reason `sales.json` is not allowed a second opinion on P/L.
@@ -614,8 +617,8 @@ for the same reason `sales.json` is not allowed a second opinion on P/L.
 `/api/holdings/chart` labelled a Dietz number "time-weighted". They answer
 different questions: money-weighted asks what the *investor* earned including
 the effect of when capital arrived, time-weighted strips that out and asks what
-the *holdings* did. On this book over nine months they read +25.55% and +27.75%;
-the gap grows without bound as contributions grow against the opening balance
+the *holdings* did. On a nine-month book with steady contributions they read
+about two points apart; the gap grows without bound as contributions grow against the opening balance
 (double $1k, add $100k, drop 10% — the two report +80% and −84% on one
 portfolio on one day). A test drives one security through two funding schedules
 and requires one answer; the staggered ledger returned −51.24% against a true
@@ -643,8 +646,8 @@ the return entirely rather than merely mistiming it.
 **Sub-year returns are not annualized** (GIPS 5.A.4). `annualized_twr` is null
 below 365 days, and the frontend falls back to the period return, so the gate
 lives in `app.py` rather than the template — the old template threshold of 14
-days raised a 29-day return to the 12.6th power and printed +96.22% as the
-largest number on the page.
+days raised a 29-day return to the 12.6th power and printed a near-doubling as
+the largest number on the page.
 
 **Cash is derived. There is no cash store and no setter.** `load_cash()` returns
 the `cash_pool` leg of `_compute_invested()`; `/api/cash` GET reports it and POST
@@ -676,7 +679,7 @@ numerator has to include it or the two tabs re-diverge by the size of the option
 book. The summary card prints "incl. ±$X options" rather than carrying the
 difference silently.
 
-Both tabs now read +9.06% on this book, and
+Both tabs now read the same figure on the same book, and
 `realized + unrealized + dividends + option P/L == (cash_pool + market value) −
 invested` holds to a penny. `cash.json` is dead and can be deleted.
 
@@ -1168,8 +1171,8 @@ listings — the same gap `_build_short_interest` documents for
 `info.get(...) or 0` turned that into 0% institutional, so `retail` fell out of
 `1 - 0 - 0` at **100%** and the frontend's `> 0` guard passed on the strength of
 that fabricated 100. GOOG.TO, MSFT.TO, META.TO and LULU.TO each drew a full
-doughnut saying they are entirely retail-held — four of the ten symbols in this
-account's portfolio, and Alphabet is ~81% institutional. The builder returns
+doughnut saying they are entirely retail-held — and Alphabet is ~81%
+institutional. The builder returns
 `{}` now and the existing empty state shows.
 
 *Over 100% was clamped.* Institutional legitimately exceeds shares outstanding
@@ -1828,12 +1831,18 @@ column-hiding selector in the phone block starts with `#`.
 - `_do_get_stock` is a single ~570-line function. `stock-intel` already
   implements the same data layer correctly and with tests; migrating the route
   onto it needs a field-by-field mapping against the frontend's ~50 reads.
-- Portfolio data (holdings/sales/transactions/watchlist) is committed to git.
-  Fine while the repo is private; move it out before sharing. `users.json` and
+- Portfolio data is no longer tracked: `users/` is gitignored as a whole, and
+  no commit reachable from `main` has ever carried a ledger. `users.json` and
   `settings.json` (at every level, including `users/<name>/settings.json`) and
   `app_secret.json` are gitignored and must stay that way — between them they
   hold the password hashes, every account's API keys, and the session signing
   key. A leaked `SECRET_KEY` lets anyone mint a valid cookie for any account.
+  The history was rewritten twice to get here, and a force-push does not delete
+  anything from GitHub: the pre-rewrite commits stayed retrievable by SHA and
+  through `refs/pull/1/head` until the remote repository was recreated. If a
+  secret or a ledger ever lands in a commit again, treat the secret as burned
+  the moment it is pushed and recreate the remote rather than force-pushing
+  over it.
 - There is no password reset by email and no MFA. `python app.py passwd <user>`
   from the machine itself is the whole recovery story, which is proportionate
   while this binds to loopback and would not be if it were ever exposed.
